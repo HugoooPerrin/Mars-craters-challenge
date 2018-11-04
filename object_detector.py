@@ -808,5 +808,5 @@ class ObjectDetector(object):
 
 
     def save_models(self, epoch):
-        torch.save(self.net.state_dict(), "/home/hugoperrin/Bureau/X/Cours/Data_camp/mars_craters/perso/models/craters_{}.model".format(epoch))
+        torch.save(self.net.state_dict(), "../models/craters_{}.model".format(epoch))
 
