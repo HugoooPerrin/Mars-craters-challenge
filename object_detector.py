@@ -35,6 +35,7 @@ https://github.com/amdegroot/ssd.pytorch/
 #================================ 0. MODULE
 
 
+
 # Basics
 import numpy as np
 import pandas as pd
@@ -359,13 +360,15 @@ def create_SSD(config, pretrained=False, device='CPU'):
 Functions used to compute the IoU between circles, and to handle the matching
 """
 
+
+
 def compute_intersection(circles_A, circles_B):
     """
     Compute intersection area between two circles
     
     Arguments:
     ----------
-        circles_A: (tensor) predicted circles, shapes: [A, 3]
+        circles_A: (tensor) priors,            shapes: [A, 3]
         circles_B: (tensor) true circles,      shapes: [B, 3]
         
     Returns:
@@ -427,13 +430,14 @@ def compute_intersection(circles_A, circles_B):
     return intersection
 
 
+
 def compute_IoU(circles_A, circles_B):
     """
     Compute intersection over Union (IoU) area between two circles
     
     Arguments:
     ----------
-        circles_A: (tensor) predicted circles, shapes: [A, 3]
+        circles_A: (tensor) priors,            shapes: [A, 3]
         circles_B: (tensor) true circles,      shapes: [B, 3]
         
     Returns:
@@ -455,13 +459,14 @@ def compute_IoU(circles_A, circles_B):
     return IoU
 
 
+
 def match(circles_A, circles_B, threshold=0.5):
     """
     Match ground truth circles with predicted ones
 
     Arguments:
     ----------
-        circles_A: (tensor) predicted circles, shapes: [A, 3]
+        circles_A: (tensor) priors,            shapes: [A, 3]
         circles_B: (tensor) true circles,      shapes: [B, 3]
         
     Returns:
@@ -509,37 +514,67 @@ Computes loss function for classification and regression problem
 """
 
 
-def encode_ground_truth(circles_B, priors, matches):
+def encode_ground_truth(true_circles, prior, matches):
+    """
+    Get truth in a loss computable format for training
+
+    Arguments:
+    ----------
+        true_circles: (tensor) shape [n_true, 3]
+        prior: (tensor)        shape [n_prior, 3]
+        matches: (tensor)      shape [n_prior, n_true]
+
+    Returns:
+    --------
+        goal: (tensor) encoded goals for learning, shape [n_matches, 3]
+    """
 
     target, indices = matches.max(dim=1)
 
     # Corresponding ground truth data for every prior
-    goal = circles_B[indices]
+    goal = true_circles[indices]
 
     # formating for loss
-    g_cxcy = (goal[:, :2] - priors[:, :2]) / priors[:, 2]
-    g_rad = torch.log((goal[:, 2] - priors[:, 2]) / priors[:, 2])
+    g_cxcy = (goal[target == 1, :2] - prior[target == 1, :2]) / prior[target == 1, 2:]
+    g_rad = torch.log((goal[target == 1, 2:] / prior[target == 1, 2:]))
 
     # Shape [num_priors, 3]
-    goal = torch.cat([g_cxcy, g_wh], 1)
+    goal = torch.cat([g_cxcy, g_rad], 1)
 
     return goal
 
 
 
-def decode_location(circles_A, priors):
-    pass
+def decode_location(pred_loc, prior):
+    """
+    Get circles from the location prediction
+
+    Arguments:
+    ----------
+        pred_loc: (tensor)     shape [n_prior, 3]
+        prior: (tensor)        shape [n_prior, 3]
+
+    Returns:
+    --------
+        predicted_circles: (tensor) shape [n_prior, 3]
+    """
+    cxcy = pred_loc[:, :2] * prior[:, 2:] + prior[:, :2]
+    rad = torch.exp(pred_loc[:, 2:]) * prior[:, 2:]
+
+    predicted_circles = torch.cat([cxcy, rad], 1)
+
+    return predicted_circles 
 
 
 
-def multi_circle_loss(circles_A, circles_B, conf, matches, alpha=1):
+def multi_circle_loss(pred_loc, goal, conf, matches, alpha=1):
     """
     Compute the loss between the prediction and the target
 
     Arguments:
     ----------
-        circles_A: (tensor) predicted circles, shapes: [A, 3]
-        circles_B: (tensor) true circles,      shapes: [B, 3]
+        pred_loc: (tensor) predicted locations, shapes: [A, 3]
+        goal: (tensor) true circles,            shapes: [n_matches, 3]
         conf:      (tensor) predicted confidence, shape: [A, 1]
         matches: (tensor), shape [A, B] 
             x(i, j) = 1 if predicted circle i is matched with truth j, else 0
@@ -549,7 +584,8 @@ def multi_circle_loss(circles_A, circles_B, conf, matches, alpha=1):
     --------
         loss: (tensor)
     """
-    if circles_B is not None:
+    if goal is not None:
+
         ## Confidence loss
         conf_loss = nn.BCEWithLogitsLoss(reduction='sum')
 
@@ -565,33 +601,31 @@ def multi_circle_loss(circles_A, circles_B, conf, matches, alpha=1):
         num_neg = min(3 * num_pos, raw_num_neg)
         negative_pred = raw_negative_pred.sort(descending=True)[0][0:num_neg]
 
-        prediction = torch.cat([positive_pred, negative_pred]).view(-1).to(circles_A.device)
-        target_conf = torch.cat([torch.ones(num_pos), torch.zeros(num_neg)]).view(-1).to(circles_A.device)
+        prediction = torch.cat([positive_pred, negative_pred]).view(-1).to(pred_loc.device)
+        target_conf = torch.cat([torch.ones(num_pos), torch.zeros(num_neg)]).view(-1).to(pred_loc.device)
 
         image_conf_loss = conf_loss(prediction, target_conf) / num_pos
 
-        ## Location loss (offsets for [cx, cy, cr] to learn)
-        positive_circles = circles_A[target == 1]
-        positive_target = circles_B[target == 1]
+        ## Location loss (offsets for [cx, cy, log(rad)] to learn)
+        pred_loc = pred_loc[target == 1]
 
-        image_loc_loss = F.smooth_l1_loss(positive_circles, positive_target, reduction='sum') / num_pos
+        image_loc_loss = F.smooth_l1_loss(pred_loc, goal, reduction='sum') / num_pos
 
         return image_conf_loss + alpha * image_loc_loss
 
     # We want to use even empty images: keep only best negative confidence to "reduce it"
     else:
-        ## Confidence loss
+
+        ## Confidence loss (only)
         conf_loss = nn.BCEWithLogitsLoss(reduction='mean')
         num_neg = 5
 
         negative_pred = conf.sort(descending=True)[0][0:num_neg].view(-1)
-        target_conf = torch.zeros(num_neg).view(-1).to(circles_A.device)
+        target_conf = torch.zeros(num_neg).view(-1).to(pred_loc.device)
 
         image_conf_loss = conf_loss(negative_pred, target_conf)
 
         return image_conf_loss
-
-
 
 
 
@@ -685,11 +719,11 @@ Main class of the script:
 
 BATCH_SIZE = 8
 NUM_EPOCHS = 10
-LEARNING_RATE = 1e-3
+LEARNING_RATE = 1e-4
 MOMENTUM = 0.9
 WEIGHT_DECAY = 5e-3
 
-DISPLAY_STEP = 100
+DISPLAY_STEP = 5
 
 
 class ObjectDetector(object):
@@ -752,7 +786,7 @@ class ObjectDetector(object):
 
                     # Get true craters
                     current_label_idx = idx[image_idx]
-                    true_circles = batches.Ytrain[batches.Ytrain[:, 0] == current_label_idx, 1:4] / 224
+                    true_circles = batches.Ytrain[batches.Ytrain[:, 0] == current_label_idx, 1:4] / 224 # Normalization to get same scale as priors
                     n_true = true_circles.size(0)
                     true_circles = Variable(true_circles).to(self.device)
 
@@ -762,7 +796,7 @@ class ObjectDetector(object):
 
                     # Matching
                     if n_true != 0:
-                        matches = match(predicted_circles, true_circles, threshold=0.4)
+                        matches = match(prior, true_circles, threshold=0.4)
                         goal = encode_ground_truth(true_circles, prior, matches)
                     else:
                         matches = None
@@ -800,7 +834,7 @@ class ObjectDetector(object):
         self.batches = CraterDataset(Xtest, 8)
 
         # Raw prediction (using sigmoid activation since not in forward)
-
+        to_proba = nn.sigmoid()
 
 
         # NMS
