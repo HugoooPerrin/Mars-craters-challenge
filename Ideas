@@ -1,0 +1,79 @@
+
+
+FULL PYTORCH GPU COMPUTING
+
+
+Transfert learning:
+    - VGG 16 (slower ?)
+    - ResNet34
+    - Mobilenet-v1
+    - Alexnet
+
+
+Model:
+    - U-net
+
+    - SSD
+
+        1 - Neural network (FCN) with multi-scale feature maps (different receptive field size)
+            The output of the net is (confidence, delta_, delta_y, delta_scale) for ALL default circles
+
+        2 - Generation of prior circles for every feature points (feature points cover a part of the image)
+            Fit ground-truth circle to best priors using IoU
+            Keep only best matches with hard negative mining
+
+        3 - Computing both loss for regression (location) and classification (conficence)
+
+        4 - Optimizing model
+
+        Tuning: Play on feature map size
+                Play on prior generation
+                Pre-trained wait for base convolutional layers
+
+    - Faster R-CNN
+    - YOLO
+
+
+Data:
+    - Feature extraction
+    - Data augmentation
+    - Add stochastic transformation on data so as to
+        increase robustness and reduce overfitting
+    - Undersampling empty images
+
+
+Bonus:
+    - Add numba in all for loops
+      (But keep avoiding for loops when possible)
+
+
+Ressources:
+    - U-net
+      https://www.kaggle.com/iafoss/unet34-dice-0-87/notebook/
+      https://www.kaggle.com/windsurfer/baseline-u-net-on-pytorch/      (Pytorch data transformation)
+
+    - SSD
+      https://github.com/qfgaohao/pytorch-ssd
+
+      https://github.com/amdegroot/ssd.pytorch/
+      https://arxiv.org/pdf/1512.02325.pdf
+      https://towardsdatascience.com/learning-note-single-shot-multibox-detector-with-pytorch-part-1-38185e84bd79
+      https://towardsdatascience.com/learning-note-single-shot-multibox-detector-with-pytorch-part-2-dd96bdf4f434
+      https://towardsdatascience.com/learning-note-single-shot-multibox-detector-with-pytorch-part-3-f0711caa65ad
+
+      https://github.com/uoip/SSD-variants/
+      https://towardsdatascience.com/understanding-ssd-multibox-real-time-object-detection-in-deep-learning-495ef744fab/
+      https://medium.com/@smallfishbigsea/understand-ssd-and-implement-your-own-caa3232cd6ad/
+      https://medium.com/@jonathan_hui/ssd-object-detection-single-shot-multibox-detector-for-real-time-processing-9bd8deac0e06
+
+    - YOLO
+      https://blog.paperspace.com/how-to-implement-a-yolo-object-detector-in-pytorch/
+
+    - VGG16
+      https://github.com/longcw/faster_rcnn_pytorch/blob/master/faster_rcnn/vgg16.py/
+
+    - CNN
+      https://medium.com/mlreview/a-guide-to-receptive-field-arithmetic-for-convolutional-neural-networks-e0f514068807
+      https://arxiv.org/pdf/1603.07285.pdf
+
+
