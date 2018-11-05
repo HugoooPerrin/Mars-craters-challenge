@@ -62,7 +62,11 @@ from math import pi
 
 # Utils
 from typing import List, Tuple
-
+from datetime import datetime
+from dateutil.relativedelta import relativedelta
+def diff(t_a, t_b):
+    t_diff = relativedelta(t_a, t_b)
+    return '{h}h {m}m {s}s'.format(h=t_diff.hours, m=t_diff.minutes, s=t_diff.seconds)
 
 
 #=========================================================================================================
@@ -284,9 +288,9 @@ def create_SSD(config, pretrained=False, device='CPU'):
     del vgg.classifier
 
     # If pretrained, freezes weights of VGG
-    if pretrained:
-        for param in vgg.features.parameters():
-            param.requires_grad = False
+    # if pretrained:
+    #     for param in vgg.features.parameters():
+    #         param.requires_grad = False
 
     # Replacing last pooling
     vgg.features[30] = nn.MaxPool2d(kernel_size=3, stride=1, padding=1)
@@ -535,8 +539,8 @@ def encode_ground_truth(true_circles, prior, matches):
     goal = true_circles[indices]
 
     # formating for loss
-    g_cxcy = (goal[target == 1, :2] - prior[target == 1, :2]) / prior[target == 1, 2:]
-    g_rad = torch.log((goal[target == 1, 2:] / prior[target == 1, 2:]))
+    g_cxcy = (goal[target == 1, :2] - prior[target == 1, :2]) / (prior[target == 1, 2:] * 0.1)
+    g_rad = torch.log((goal[target == 1, 2:] / prior[target == 1, 2:])) / 0.2
 
     # Shape [num_priors, 3]
     goal = torch.cat([g_cxcy, g_rad], 1)
@@ -558,8 +562,8 @@ def decode_location(pred_loc, prior):
     --------
         predicted_circles: (tensor) shape [n_prior, 3]
     """
-    cxcy = pred_loc[:, :2] * prior[:, 2:] + prior[:, :2]
-    rad = torch.exp(pred_loc[:, 2:]) * prior[:, 2:]
+    cxcy = pred_loc[:, :2] * prior[:, 2:] * 0.1 + prior[:, :2]
+    rad = torch.exp(pred_loc[:, 2:] * 0.2) * prior[:, 2:]
 
     predicted_circles = torch.cat([cxcy, rad], 1)
 
@@ -599,7 +603,7 @@ def multi_circle_loss(pred_loc, goal, conf, matches, alpha=1):
 
         # Hard negative mining (reduce the ratio of negative over positive samples to 3:1)
         num_neg = min(3 * num_pos, raw_num_neg)
-        negative_pred = raw_negative_pred.sort(descending=True)[0][0:num_neg]
+        negative_pred = raw_negative_pred.sort(dim=0, descending=True)[0][0:num_neg]
 
         prediction = torch.cat([positive_pred, negative_pred]).view(-1).to(pred_loc.device)
         target_conf = torch.cat([torch.ones(num_pos), torch.zeros(num_neg)]).view(-1).to(pred_loc.device)
@@ -618,9 +622,9 @@ def multi_circle_loss(pred_loc, goal, conf, matches, alpha=1):
 
         ## Confidence loss (only)
         conf_loss = nn.BCEWithLogitsLoss(reduction='mean')
-        num_neg = 5
+        num_neg = 3
 
-        negative_pred = conf.sort(descending=True)[0][0:num_neg].view(-1)
+        negative_pred = conf.sort(dim=0, descending=True)[0][0:num_neg].view(-1)
         target_conf = torch.zeros(num_neg).view(-1).to(pred_loc.device)
 
         image_conf_loss = conf_loss(negative_pred, target_conf)
@@ -717,13 +721,18 @@ Main class of the script:
 """
 
 
-BATCH_SIZE = 8
-NUM_EPOCHS = 10
-LEARNING_RATE = 1e-4
-MOMENTUM = 0.9
-WEIGHT_DECAY = 5e-3
 
-DISPLAY_STEP = 5
+# HYPERPARAMETERS
+
+BATCH_SIZE = 8
+NUM_EPOCHS = 6
+LEARNING_RATE = 1e-5
+MOMENTUM = 0.9
+WEIGHT_DECAY = 1e-4
+
+DISPLAY_STEP = 50
+
+
 
 
 class ObjectDetector(object):
@@ -741,13 +750,13 @@ class ObjectDetector(object):
 
         # Creating and initializing neural network
         print('Creating neural network on {}'.format(d), end='...')
-        self.net = create_SSD(config=config, device=self.device)
+        self.net = create_SSD(config=config, pretrained=False, device=self.device)
         print('done')
 
         # Count the number of parameters in the network
         model_parameters = filter(lambda p: p.requires_grad, self.net.parameters())
         params = sum([np.prod(p.size()) for p in model_parameters])
-        print('\n>> Learning: {} parameters\n'.format(params))
+        print('>> Learning: {} parameters\n'.format(params))
 
 
     def fit(self, Xtrain, Ytrain):
@@ -761,6 +770,7 @@ class ObjectDetector(object):
                                                 weight_decay=WEIGHT_DECAY)
 
         # Optimizing
+        time = datetime.now()
         step_number = 0
         for epoch in range(NUM_EPOCHS):
 
@@ -796,14 +806,14 @@ class ObjectDetector(object):
 
                     # Matching
                     if n_true != 0:
-                        matches = match(prior, true_circles, threshold=0.4)
+                        matches = match(prior, true_circles, threshold=0.5)
                         goal = encode_ground_truth(true_circles, prior, matches)
                     else:
                         matches = None
                         goal = None
 
                     # Image loss
-                    image_loss = multi_circle_loss(predicted_loc, goal, predicted_conf, matches, 2)
+                    image_loss = multi_circle_loss(predicted_loc, goal, predicted_conf, matches, 1)
 
                     # Batch loss
                     loss += image_loss
@@ -825,6 +835,8 @@ class ObjectDetector(object):
                           (epoch, step_number, running_loss / step_number))
 
             self.save_models(epoch + 1)
+
+        print('Training time {}\n'.format(diff(datetime.now(), time)))
 
 
 
