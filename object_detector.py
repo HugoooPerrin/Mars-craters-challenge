@@ -10,6 +10,7 @@ Mars craters ramp challenge 2018
 (Simplified) Single Shot MultiBox Detector (SSD) implementation on pytorch
     - Only one class to predict 
     - Circles instead of boxes => fewer priors (2100)
+    - Smaller priors to better fit the data
 
 
 
@@ -79,8 +80,8 @@ config = {
     'feature_maps' : [28, 14, 7, 4, 2, 1],       # Feature maps sizes (x.shape)
     'min_dim'      : 224,                        # Image size                           
     'steps'        : [8, 16, 32, 64, 100, 224],                                                   
-    'min_sizes'    : [5, 5, 10, 10, 18, 18],     # Min radius for all receptive fields                                             
-    'max_sizes'    : [13, 13, 20, 20, 28, 28],   # Max radius for all receptive fields                                            
+    'min_sizes'    : [5, 5, 7, 7, 10, 10],     # Min radius for all receptive fields                                             
+    'max_sizes'    : [8, 8, 10, 10, 13, 13],   # Max radius for all receptive fields                                            
     'variance'     : [0.1],                                  
     'clip'         : True,                                                   
     'name'         : 'config'}
@@ -499,8 +500,8 @@ def match(circles_A, circles_B, threshold=0.5):
     # Matches: 1 if IoU > threshold or if best match and any IoU > threshold
     matches = torch.zeros(overlaps.shape).to(circles_A.device)
     matches[best_prior_idx, [i for i in range(num_true)]] = 1
-    overlaps[overlaps < 0.5] = 0
-    overlaps[overlaps >= 0.5] = 1
+    overlaps[overlaps < threshold] = 0
+    overlaps[overlaps >= threshold] = 1
     matches[matches.sum(dim=1) == 0, :] = overlaps[matches.sum(dim=1) == 0, :]
 
     return matches
@@ -539,8 +540,8 @@ def encode_ground_truth(true_circles, prior, matches):
     goal = true_circles[indices]
 
     # formating for loss
-    g_cxcy = (goal[target == 1, :2] - prior[target == 1, :2]) / (prior[target == 1, 2:] * 0.1)
-    g_rad = torch.log((goal[target == 1, 2:] / prior[target == 1, 2:])) / 0.2
+    g_cxcy = (goal[target == 1, :2] - prior[target == 1, :2]) / (2 * prior[target == 1, 2:] * 0.1)
+    g_rad = torch.log((goal[target == 1, 2:] / (2 * prior[target == 1, 2:]))) / 0.1
 
     # Shape [num_priors, 3]
     goal = torch.cat([g_cxcy, g_rad], 1)
@@ -562,8 +563,8 @@ def decode_location(pred_loc, prior):
     --------
         predicted_circles: (tensor) shape [n_prior, 3]
     """
-    cxcy = pred_loc[:, :2] * prior[:, 2:] * 0.1 + prior[:, :2]
-    rad = torch.exp(pred_loc[:, 2:] * 0.2) * prior[:, 2:]
+    cxcy = pred_loc[:, :2] * prior[:, 2:] * 0.1 * 2 + prior[:, :2]
+    rad = torch.exp(pred_loc[:, 2:] * 0.1) * prior[:, 2:] * 2
 
     predicted_circles = torch.cat([cxcy, rad], 1)
 
@@ -614,6 +615,8 @@ def multi_circle_loss(pred_loc, goal, conf, matches, alpha=1):
         pred_loc = pred_loc[target == 1]
 
         image_loc_loss = F.smooth_l1_loss(pred_loc, goal, reduction='sum') / num_pos
+
+        # print('Conf: %.2f, loc: %.2f' % (image_conf_loss, image_loc_loss))
 
         return image_conf_loss + alpha * image_loc_loss
 
@@ -724,9 +727,9 @@ Main class of the script:
 
 # HYPERPARAMETERS
 
-BATCH_SIZE = 8
-NUM_EPOCHS = 6
-LEARNING_RATE = 1e-5
+BATCH_SIZE = 16
+NUM_EPOCHS = 8
+LEARNING_RATE = 1e-6
 MOMENTUM = 0.9
 WEIGHT_DECAY = 1e-4
 
@@ -750,13 +753,13 @@ class ObjectDetector(object):
 
         # Creating and initializing neural network
         print('Creating neural network on {}'.format(d), end='...')
-        self.net = create_SSD(config=config, pretrained=False, device=self.device)
+        self.net = create_SSD(config=config, pretrained=True, device=self.device)
         print('done')
 
         # Count the number of parameters in the network
         model_parameters = filter(lambda p: p.requires_grad, self.net.parameters())
         params = sum([np.prod(p.size()) for p in model_parameters])
-        print('>> Learning: {} parameters\n'.format(params))
+        print('>> Learning: {} parameters'.format(params))
 
 
     def fit(self, Xtrain, Ytrain):
@@ -764,15 +767,19 @@ class ObjectDetector(object):
         # Processing data
         batches = CraterDataset(Xtrain, BATCH_SIZE, Ytrain)
 
-        # Optimizer
-        optimizer = optim.SGD(self.net.parameters(), lr=LEARNING_RATE, 
-                                                momentum=MOMENTUM,
-                                                weight_decay=WEIGHT_DECAY)
-
         # Optimizing
         time = datetime.now()
         step_number = 0
         for epoch in range(NUM_EPOCHS):
+
+            # Optimizer
+            optimizer = optim.SGD(self.net.parameters(), lr=LEARNING_RATE * 1.1 ** epoch)
+                                                 # momentum=MOMENTUM,
+                                                 # weight_decay=WEIGHT_DECAY)
+
+            self.save_models(epoch)
+
+            print('Current learning rate: {}'.format(LEARNING_RATE * 1.1 ** epoch))
 
             step_number = 0
             running_loss = 0.0
@@ -796,7 +803,7 @@ class ObjectDetector(object):
 
                     # Get true craters
                     current_label_idx = idx[image_idx]
-                    true_circles = batches.Ytrain[batches.Ytrain[:, 0] == current_label_idx, 1:4] / 224 # Normalization to get same scale as priors
+                    true_circles = batches.Ytrain[batches.Ytrain[:, 0] == current_label_idx, 1:4] / 224
                     n_true = true_circles.size(0)
                     true_circles = Variable(true_circles).to(self.device)
 
@@ -806,14 +813,14 @@ class ObjectDetector(object):
 
                     # Matching
                     if n_true != 0:
-                        matches = match(prior, true_circles, threshold=0.5)
+                        matches = match(prior, true_circles, threshold=0.35)
                         goal = encode_ground_truth(true_circles, prior, matches)
                     else:
                         matches = None
                         goal = None
 
                     # Image loss
-                    image_loss = multi_circle_loss(predicted_loc, goal, predicted_conf, matches, 1)
+                    image_loss = multi_circle_loss(predicted_loc, goal, predicted_conf, matches, 0.4)
 
                     # Batch loss
                     loss += image_loss
@@ -831,12 +838,10 @@ class ObjectDetector(object):
                 step_number += 1
 
                 if step_number % DISPLAY_STEP == 0:
-                    print('Epoch: %d  ||  step: %4d  ||  mean training loss: %.4f' % 
+                    print('Epoch: %d  |  step: %4d  |  mean training loss: %.4f' % 
                           (epoch, step_number, running_loss / step_number))
 
-            self.save_models(epoch + 1)
-
-        print('Training time {}\n'.format(diff(datetime.now(), time)))
+        print('\nTraining time {}'.format(diff(datetime.now(), time)))
 
 
 
@@ -848,11 +853,11 @@ class ObjectDetector(object):
         # Raw prediction (using sigmoid activation since not in forward)
         to_proba = nn.sigmoid()
 
-
         # NMS
 
 
 
     def save_models(self, epoch):
+        print('\nSaving model', end='...')
         torch.save(self.net.state_dict(), "../models/craters_{}.model".format(epoch))
-
+        print('done\n')
