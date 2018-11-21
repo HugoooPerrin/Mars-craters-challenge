@@ -10,9 +10,9 @@ import pandas as pd
 import numpy as np 
 
 # Object detector
-from object_detector import *
+from object_detector_Unet import *
 
-model_path = "../models/craters_VGG.model"
+model_path = "../models/craters_7.model"
 
 #=========================================================================================================
 #================================ 1. DATA
@@ -38,10 +38,8 @@ print('done')
 #================================ 2. TRAINING
 
 
-# Using pre-trained VGG for feature extraction
 object_detector = ObjectDetector()
 # object_detector.net.load_state_dict(torch.load(model_path))
 
-# Training the extras & predicting layers
 object_detector.fit(Xtrain, Ytrain)
 

@@ -27,6 +27,7 @@ Main reference for pytorch implementation:
 
 https://towardsdatascience.com/learning-note-single-shot-multibox-detector-with-pytorch-part-1-38185e84bd79
 https://github.com/amdegroot/ssd.pytorch/
+https://github.com/timctho/unet-pytorch/
 """
 
 
@@ -54,7 +55,7 @@ from torchvision.transforms import Grayscale
 import torch.utils.model_zoo as model_zoo
 from torch.utils.data import TensorDataset, DataLoader
 
-from torchvision.transforms import Grayscale, ToPILImage, ToTensor
+from torchvision.transforms import Normalize
 
 # Mathematic tools
 from itertools import product as product
@@ -65,6 +66,7 @@ from math import pi
 from typing import List, Tuple
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
+
 def diff(t_a, t_b):
     t_diff = relativedelta(t_a, t_b)
     return '{h}h {m}m {s}s'.format(h=t_diff.hours, m=t_diff.minutes, s=t_diff.seconds)
@@ -77,11 +79,11 @@ def diff(t_a, t_b):
 
 
 config = {                           
-    'feature_maps' : [28, 14, 7, 4, 2, 1],       # Feature maps sizes (x.shape)
-    'min_dim'      : 224,                        # Image size                           
-    'steps'        : [8, 16, 32, 64, 100, 224],                                                   
-    'min_sizes'    : [5, 5, 7, 7, 10, 10],     # Min radius for all receptive fields                                             
-    'max_sizes'    : [8, 8, 10, 10, 13, 13],   # Max radius for all receptive fields                                            
+    'feature_maps' : [56, 28],       # Feature maps sizes (x.shape)
+    'min_dim'      : 224,            # Image size                           
+    'steps'        : [4, 8],                                                   
+    'min_sizes'    : [6, 7.5],       # Min radius for all receptive fields                                             
+    'max_sizes'    : [9, 11],        # Max radius for all receptive fields                                            
     'variance'     : [0.1],                                  
     'clip'         : True,                                                   
     'name'         : 'config'}
@@ -157,202 +159,112 @@ next steps:
     - Try other architectures (U-net for pixel prediction)
 """
 
+class UNet_down_block(nn.Module):
 
+    def __init__(self, input_channel, output_channel, down_size):
+        super(UNet_down_block, self).__init__()
 
-class L2Norm(nn.Module):
-    """
-    Adding a learned normalization layer to the unique source taken inside 
-    VGG convolutional layers
-    """
-    def __init__(self, n_channels, scale):
-        super(L2Norm,self).__init__()
-        
-        self.n_channels = n_channels
-        self.gamma = scale or None
-        self.eps = 1e-10
-        self.weight = nn.Parameter(torch.Tensor(self.n_channels))
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        nn.init.constant_(self.weight,self.gamma)
+        self.conv1 = nn.Conv2d(input_channel, output_channel, 3, padding=1)
+        self.bn1 = nn.BatchNorm2d(output_channel)
+        self.conv2 = nn.Conv2d(output_channel, output_channel, 3, padding=1)
+        self.bn2 = nn.BatchNorm2d(output_channel)
+        self.conv3 = nn.Conv2d(output_channel, output_channel, 3, padding=1)
+        self.bn3 = nn.BatchNorm2d(output_channel)
+        self.max_pool = nn.MaxPool2d(2, 2)
+        self.relu = nn.ReLU()
+        self.down_size = down_size
 
     def forward(self, x):
-        norm = x.pow(2).sum(dim=1, keepdim=True).sqrt() + self.eps
-        #x /= norm
-        x = torch.div(x, norm)
-        out = self.weight.unsqueeze(0).unsqueeze(2).unsqueeze(3).expand_as(x) * x
-        
-        return out
+        if self.down_size:
+            x = self.max_pool(x)
+        x = self.relu(self.bn1(self.conv1(x)))
+        x = self.relu(self.bn2(self.conv2(x)))
+        x = self.relu(self.bn3(self.conv3(x)))
+        return x
+
+
+class UNet_up_block(nn.Module):
+
+    def __init__(self, prev_channel, input_channel, output_channel):
+        super(UNet_up_block, self).__init__()
+
+        self.conv1 = nn.Conv2d(prev_channel + input_channel, output_channel, 3, padding=1)
+        self.bn1 = nn.BatchNorm2d(output_channel)
+        self.conv2 = nn.Conv2d(output_channel, output_channel, 3, padding=1)
+        self.bn2 = nn.BatchNorm2d(output_channel)
+        self.conv3 = nn.Conv2d(output_channel, output_channel, 3, padding=1)
+        self.bn3 = nn.BatchNorm2d(output_channel)
+        self.relu = nn.ReLU()
+
+    def forward(self, prev_feature_map, x):
+        x = F.interpolate(align_corners=True, input=x, mode='bilinear', scale_factor=2)
+        x = torch.cat((x, prev_feature_map), dim=1)
+        x = self.relu(self.bn1(self.conv1(x)))
+        x = self.relu(self.bn2(self.conv2(x)))
+        x = self.relu(self.bn3(self.conv3(x)))
+        return x
 
     
-class SSD(nn.Module):
+class Unet(nn.Module):
     
-    def __init__(self, base_net, base_extension, extras, confidence_headers,
-                 location_headers, config, device='cpu'):
+    def __init__(self, num_priors):
         """
-        Compose a SSD model using the given components
-        
+        U-net for prior level prediction
+
         Arguments:
         -----------
-            base_net           : nn.ModuleList or nn.Sequential
-            base_extention     : nn.Sequential
-            extras             : nn.ModuleList
-            confidence_headers : nn.ModuleList
-            location_headers   : nn.ModuleList
-            config             : dictionaries
-                All the prior parameters
-            device             : String
+            num_priors           : int
         
         Returns:
         --------
-            locations   : location prediction (x, y, r) for each feature map element
-            confidences : confidence score for each feature map element
-            priors      : default bounding circles
+            confidences : confidence score for each prior
         """
-        super(SSD, self).__init__()
+        super(Unet, self).__init__()
 
-        self.config = config
-        self.priorcircle = PriorCircle(self.config)
-        self.priors = Variable(self.priorcircle.forward(), requires_grad=False).to(device)
+        self.down_block1 = UNet_down_block(1, 16, False)
+        self.down_block2 = UNet_down_block(16, 32, True)
+        self.down_block3 = UNet_down_block(32, 64, True)
 
-        # Base feature extractor
-        self.base_net = base_net
-        self.base_extension = base_extension
-        
-        # Layer learns to scale the l2 normalized features from conv4_3
-        self.L2Norm = L2Norm(512, 20)
-        
-        # Additional layers
-        self.extras = extras
+        self.mid_conv1 = nn.Conv2d(64, 64, 3, padding=1)
+        self.bn1 = nn.BatchNorm2d(64)
+        self.mid_conv2 = nn.Conv2d(64, 64, 3, padding=1)
+        self.bn2 = nn.BatchNorm2d(64)
 
-        # Location heads
-        self.locations = location_headers
-        
-        # Confidence heads
-        self.confidences = confidence_headers
+        self.up_block1 = UNet_up_block(32, 64, 32)
+        self.up_block2 = UNet_up_block(16, 32, 16)
 
-        
+        self.last_conv1 = nn.Conv2d(16, 16, 3, padding=1)
+        self.last_bn = nn.BatchNorm2d(16)
+        self.last_conv2 = nn.Conv2d(16, 1, 3, padding=1)
+
+        self.last_maxpooling = nn.MaxPool2d(2, 2)
+        self.relu = nn.ReLU()
+
+        self.to_confidence = nn.Linear(112 * 112, num_priors)
+
+
     def forward(self, x):
         """
-        X: input image or batch of images. Shape: [batch_size, 3, 224, 224]
+        X: input image or batch of images. Shape: [batch_size, 1, 224, 224]
         """
-        sources = []
-        locations = []
-        confidences = []
+        x1 = self.down_block1(x)
+        x2 = self.down_block2(x1)
+        x3 = self.down_block3(x2)
 
-        # Apply VGG up to conv4_3 relu
-        for k in range(23):
-            x = self.base_net[k](x)
+        x3 = self.relu(self.bn1(self.mid_conv1(x3)))
+        x3 = self.relu(self.bn2(self.mid_conv2(x3)))
 
-        s = self.L2Norm(x)
-        sources.append(s)
+        x = self.up_block1(x2, x3)
+        x = self.up_block2(x1, x)
 
-        # Apply VGG up to the end
-        for k in range(23, len(self.base_net)):
-            x = self.base_net[k](x)
+        x = self.relu(self.last_bn(self.last_conv1(x)))
+        x = self.last_maxpooling(self.last_conv2(x))
 
-        # Extend base if necessary
-        x = self.base_extension(x)
-        sources.append(x)
+        x = x.view(-1, 112 * 112)
 
-        # Apply extra layers and cache source layer outputs
-        for extra in self.extras:
-            x = extra(x)
-            sources.append(x)
+        x = self.to_confidence(x)
 
-        # Apply multi circle heads to source layers (sigmoid activation for confidence, computed directly during loss)
-        for (x, l, c) in zip(sources, self.locations, self.confidences):
-            locations.append(l(x).permute(0, 2, 3, 1).contiguous())
-            confidences.append(c(x).permute(0, 2, 3, 1).contiguous())
-
-        # Reshape tensor lists
-        locations = torch.cat([o.view(o.size(0), -1) for o in locations], 1)
-        confidences = torch.cat([o.view(o.size(0), -1) for o in confidences], 1)
-        
-        output = (
-            locations.view(locations.size(0), -1, 3),
-            confidences.view(confidences.size(0), -1, 1),
-            self.priors
-            )
-
-        return output
-
-
-def create_SSD(config, pretrained=False, device='CPU'):
-
-    """
-    Architecture of our coming SSD neural network
-    """
-
-    # Importing VGG from pytorch as a base for our model
-    vgg = models.vgg16(pretrained=pretrained)
-    del vgg.classifier
-
-    # If pretrained, freezes weights of VGG
-    # if pretrained:
-    #     for param in vgg.features.parameters():
-    #         param.requires_grad = False
-
-    # Replacing last pooling
-    vgg.features[30] = nn.MaxPool2d(kernel_size=3, stride=1, padding=1)
-
-    base_net = vgg.features
-
-    # Extending base net
-    base_extension = nn.Sequential(
-        nn.Conv2d(512, 1024, kernel_size=3, padding=6, dilation=6),
-        nn.ReLU(inplace=True),
-        nn.Conv2d(1024, 1024, kernel_size=1),
-        nn.ReLU(inplace=True))
-        
-    # Extras are the layers following the base net to allow multi-scale feature mapping
-    extras = nn.ModuleList([
-        nn.Sequential(
-            nn.Conv2d(in_channels=1024, out_channels=256, kernel_size=1),
-            nn.ReLU(),
-            nn.Conv2d(in_channels=256, out_channels=512, kernel_size=3, stride=2, padding=1),
-            nn.ReLU()
-        ),
-        nn.Sequential(
-            nn.Conv2d(in_channels=512, out_channels=128, kernel_size=1),
-            nn.ReLU(),
-            nn.Conv2d(in_channels=128, out_channels=256, kernel_size=3, stride=2, padding=1),
-            nn.ReLU()
-        ),
-        nn.Sequential(
-            nn.Conv2d(in_channels=256, out_channels=128, kernel_size=1),
-            nn.ReLU(),
-            nn.Conv2d(in_channels=128, out_channels=256, kernel_size=3),
-            nn.ReLU()
-        ),
-        nn.Sequential(
-            nn.Conv2d(in_channels=256, out_channels=128, kernel_size=1),
-            nn.ReLU(),
-            nn.Conv2d(in_channels=128, out_channels=256, kernel_size=2),
-            nn.ReLU()
-        )])
-    
-    # Compute the location of all circles at different feature scale
-    # (cx, cy, cr)
-    location_headers = nn.ModuleList([
-        nn.Conv2d(in_channels=512, out_channels=2 * 3, kernel_size=3, padding=1),
-        nn.Conv2d(in_channels=1024, out_channels=2 * 3, kernel_size=3, padding=1),
-        nn.Conv2d(in_channels=512, out_channels=2 * 3, kernel_size=3, padding=1),
-        nn.Conv2d(in_channels=256, out_channels=2 * 3, kernel_size=3, padding=1),
-        nn.Conv2d(in_channels=256, out_channels=2 * 3, kernel_size=3, padding=1),
-        nn.Conv2d(in_channels=256, out_channels=2 * 3, kernel_size=3, padding=1)])
-
-    # Compute the confidence for all circles at different feature scale
-    confidence_headers = nn.ModuleList([
-        nn.Conv2d(in_channels=512, out_channels=2, kernel_size=3, padding=1),
-        nn.Conv2d(in_channels=1024, out_channels=2, kernel_size=3, padding=1),
-        nn.Conv2d(in_channels=512, out_channels=2, kernel_size=3, padding=1),
-        nn.Conv2d(in_channels=256, out_channels=2, kernel_size=3, padding=1),
-        nn.Conv2d(in_channels=256, out_channels=2, kernel_size=3, padding=1),
-        nn.Conv2d(in_channels=256, out_channels=2, kernel_size=3, padding=1)])
-    
-    return SSD(base_net, base_extension, extras, confidence_headers, location_headers, config, device).to(device)
-
+        return x
 
 
 #=========================================================================================================
@@ -519,120 +431,40 @@ Computes loss function for classification and regression problem
 """
 
 
-def encode_ground_truth(true_circles, prior, matches):
-    """
-    Get truth in a loss computable format for training
-
-    Arguments:
-    ----------
-        true_circles: (tensor) shape [n_true, 3]
-        prior: (tensor)        shape [n_prior, 3]
-        matches: (tensor)      shape [n_prior, n_true]
-
-    Returns:
-    --------
-        goal: (tensor) encoded goals for learning, shape [n_matches, 3]
-    """
-
-    target, indices = matches.max(dim=1)
-
-    # Corresponding ground truth data for every prior
-    goal = true_circles[indices]
-
-    # formating for loss
-    g_cxcy = (goal[target == 1, :2] - prior[target == 1, :2]) / (2 * prior[target == 1, 2:] * 0.1)
-    g_rad = torch.log((goal[target == 1, 2:] / (2 * prior[target == 1, 2:]))) / 0.1
-
-    # Shape [num_priors, 3]
-    goal = torch.cat([g_cxcy, g_rad], 1)
-
-    return goal
-
-
-
-def decode_location(pred_loc, prior):
-    """
-    Get circles from the location prediction
-
-    Arguments:
-    ----------
-        pred_loc: (tensor)     shape [n_prior, 3]
-        prior: (tensor)        shape [n_prior, 3]
-
-    Returns:
-    --------
-        predicted_circles: (tensor) shape [n_prior, 3]
-    """
-    cxcy = pred_loc[:, :2] * prior[:, 2:] * 0.1 * 2 + prior[:, :2]
-    rad = torch.exp(pred_loc[:, 2:] * 0.1) * prior[:, 2:] * 2
-
-    predicted_circles = torch.cat([cxcy, rad], 1)
-
-    return predicted_circles 
-
-
-
-def multi_circle_loss(pred_loc, goal, conf, matches, alpha=1):
+def circle_loss(predicted_conf, matches):
     """
     Compute the loss between the prediction and the target
 
     Arguments:
     ----------
-        pred_loc: (tensor) predicted locations, shapes: [A, 3]
-        goal: (tensor) true circles,            shapes: [n_matches, 3]
-        conf:      (tensor) predicted confidence, shape: [A, 1]
+        predicted_conf:      (tensor) predicted confidence, shape: [A]
         matches: (tensor), shape [A, B] 
             x(i, j) = 1 if predicted circle i is matched with truth j, else 0
-        alpha: (float) weight of location loss
 
     Returns:
     --------
         loss: (tensor)
     """
-    if goal is not None:
+    if matches is not None:
+        conf_loss = nn.BCEWithLogitsLoss(reduction='elementwise_mean')
 
-        ## Confidence loss
-        conf_loss = nn.BCEWithLogitsLoss(reduction='sum')
+        target, _ = matches.max(dim=1)
 
-        target, indices = matches.max(dim=1)
-
-        positive_pred = conf[target == 1]
+        positive_pred = predicted_conf[target == 1]
         num_pos = positive_pred.size(0)
 
-        raw_negative_pred = conf[target == 0]
-        raw_num_neg = raw_negative_pred.size(0)
+        raw_negative_pred = predicted_conf[target == 0]
 
         # Hard negative mining (reduce the ratio of negative over positive samples to 3:1)
-        num_neg = min(3 * num_pos, raw_num_neg)
+        num_neg = 3 * num_pos
         negative_pred = raw_negative_pred.sort(dim=0, descending=True)[0][0:num_neg]
 
-        prediction = torch.cat([positive_pred, negative_pred]).view(-1).to(pred_loc.device)
-        target_conf = torch.cat([torch.ones(num_pos), torch.zeros(num_neg)]).view(-1).to(pred_loc.device)
+        prediction = torch.cat([positive_pred, negative_pred]).view(-1).to(predicted_conf.device)
+        target = torch.cat([torch.ones(num_pos), torch.zeros(num_neg)]).view(-1).to(predicted_conf.device)
 
-        image_conf_loss = conf_loss(prediction, target_conf) / num_pos
+        loss = conf_loss(prediction, target)
 
-        ## Location loss (offsets for [cx, cy, log(rad)] to learn)
-        pred_loc = pred_loc[target == 1]
-
-        image_loc_loss = F.smooth_l1_loss(pred_loc, goal, reduction='sum') / num_pos
-
-        # print('Conf: %.2f, loc: %.2f' % (image_conf_loss, image_loc_loss))
-
-        return image_conf_loss + alpha * image_loc_loss
-
-    # We want to use even empty images: keep only best negative confidence to "reduce it"
-    else:
-
-        ## Confidence loss (only)
-        conf_loss = nn.BCEWithLogitsLoss(reduction='mean')
-        num_neg = 3
-
-        negative_pred = conf.sort(dim=0, descending=True)[0][0:num_neg].view(-1)
-        target_conf = torch.zeros(num_neg).view(-1).to(pred_loc.device)
-
-        image_conf_loss = conf_loss(negative_pred, target_conf)
-
-        return image_conf_loss
+        return loss
 
 
 
@@ -659,13 +491,10 @@ class CraterDataset(object):
         # Index
         idx = torch.arange(0, Xtrain.shape[0], dtype=torch.float)
 
-        # To torch tensor
-        Xtrain = torch.tensor(Xtrain, dtype=torch.float)
+        # To torch tensor & normalization
+        Xtrain = torch.tensor(Xtrain / 255, dtype=torch.float).unsqueeze(1)
         if Ytrain is not None:
             self.Ytrain = torch.tensor(Ytrain, dtype=torch.float)
-
-        # Gray scaling
-        Xtrain = self.gray_scale(Xtrain)
 
         # Data augmentation (to come)
 
@@ -675,30 +504,6 @@ class CraterDataset(object):
                                  batch_size=batch_size,
                                  shuffle=True,
                                  num_workers=8)
-
-
-    def gray_scale(self, X):
-        """
-        Transform a gray-scaled image (channel=1) into a RGB one (channel=3)
-        
-        Arguments:
-        ----------
-            Xtrain: (tensor) set of images, shape [num_images, 224, 224]
-            
-        Returns:
-        --------
-            train_tensor: (tensor) set of images, shape [num_images, 3, 224, 224]
-        """
-        transform = Grayscale(num_output_channels=3)
-        to_image = ToPILImage()
-        to_tensor = ToTensor()
-
-        train_tensor = torch.zeros((X.size(0), 3, 224, 224), dtype=torch.float)
-        for image_idx in range(X.size(0)):
-            image = X[image_idx].unsqueeze(0)
-            train_tensor[image_idx] = to_tensor(transform(to_image(image)))
-        
-        return train_tensor
 
 
     def data_augmentation(self):
@@ -728,8 +533,10 @@ Main class of the script:
 # HYPERPARAMETERS
 
 BATCH_SIZE = 16
-NUM_EPOCHS = 8
-LEARNING_RATE = 1e-6
+NUM_EPOCHS = 10
+LEARNING_RATE = 1e-3
+LEARNING_RATE_DECAY = 0.95
+
 MOMENTUM = 0.9
 WEIGHT_DECAY = 1e-4
 
@@ -751,9 +558,14 @@ class ObjectDetector(object):
             self.device = 'cpu'
             print('WARNING: Optimization on CPU will be much slower')
 
+        # Creating priors
+        print('Creating priors', end='...')
+        self.priors = PriorCircle(config).forward().to(self.device)
+        print('done')
+
         # Creating and initializing neural network
         print('Creating neural network on {}'.format(d), end='...')
-        self.net = create_SSD(config=config, pretrained=True, device=self.device)
+        self.net = Unet(self.priors.shape[0]).to(self.device)
         print('done')
 
         # Count the number of parameters in the network
@@ -773,13 +585,11 @@ class ObjectDetector(object):
         for epoch in range(NUM_EPOCHS):
 
             # Optimizer
-            optimizer = optim.SGD(self.net.parameters(), lr=LEARNING_RATE * 1.1 ** epoch)
+            optimizer = optim.SGD(self.net.parameters(), lr=LEARNING_RATE * LEARNING_RATE_DECAY ** epoch)
                                                  # momentum=MOMENTUM,
                                                  # weight_decay=WEIGHT_DECAY)
 
-            self.save_models(epoch)
-
-            print('Current learning rate: {}'.format(LEARNING_RATE * 1.1 ** epoch))
+            print('Current learning rate: %.6f' % (LEARNING_RATE * LEARNING_RATE_DECAY ** epoch))
 
             step_number = 0
             running_loss = 0.0
@@ -794,7 +604,7 @@ class ObjectDetector(object):
                 optimizer.zero_grad()
 
                 # Forward
-                loc, conf, prior = self.net(inputs)
+                confidence = self.net(inputs)
 
                 loss = 0
 
@@ -808,22 +618,19 @@ class ObjectDetector(object):
                     true_circles = Variable(true_circles).to(self.device)
 
                     # Get prediction
-                    predicted_loc = loc[image_idx]
-                    predicted_conf = conf[image_idx]
+                    predicted_conf = confidence[image_idx]
 
                     # Matching
                     if n_true != 0:
-                        matches = match(prior, true_circles, threshold=0.35)
-                        goal = encode_ground_truth(true_circles, prior, matches)
+                        matches = match(self.priors, true_circles, threshold=0.2)
                     else:
                         matches = None
-                        goal = None
 
                     # Image loss
-                    image_loss = multi_circle_loss(predicted_loc, goal, predicted_conf, matches, 0.4)
+                    image_loss = circle_loss(predicted_conf, matches)
 
                     # Batch loss
-                    loss += image_loss
+                    loss += image_loss / BATCH_SIZE
 
                 del inputs, idx
 
@@ -840,6 +647,8 @@ class ObjectDetector(object):
                 if step_number % DISPLAY_STEP == 0:
                     print('Epoch: %d  |  step: %4d  |  mean training loss: %.4f' % 
                           (epoch, step_number, running_loss / step_number))
+
+            self.save_models(epoch)
 
         print('\nTraining time {}'.format(diff(datetime.now(), time)))
 
