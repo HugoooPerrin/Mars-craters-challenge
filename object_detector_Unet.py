@@ -198,7 +198,9 @@ class Unet(nn.Module):
 
 
 def create_circular_mask(center, radius):
-
+    """
+    Create a 224 x 224 mask from a circle coordinate
+    """
     Y, X = np.ogrid[:224, :224]
     dist_from_center = np.sqrt((X - center[0]) ** 2 + (Y - center[1]) ** 2)
 
@@ -208,7 +210,9 @@ def create_circular_mask(center, radius):
 
 
 def masking(Xtrain, Ytrain):
-    
+    """
+    Create the mask labels for all images and craters
+    """
     n_images = Xtrain.shape[0]
     
     Ytrain_mask = np.zeros((n_images, 1, 224, 224))
@@ -229,43 +233,19 @@ def masking(Xtrain, Ytrain):
 
 
 def get_prediction(confidences, threshold):
+    """
+    Get the prediction from the raw output of the Unet
+    """
     confidences = nn.Sigmoid()(confidences)
     prediction = confidences > threshold
+
     return prediction
 
 
 
 #=========================================================================================================
 #=========================================================================================================
-#================================ 4. LOSS FUNCTION
-
-
-
-"""
-Computes loss function for classification problem
-"""
-
-
-def circle_loss(predicted_conf, target_mask):
-    """
-    Compute the loss between the prediction and the target
-
-    Arguments:
-    ----------
-        predicted_conf:      (tensor), shape: [224, 224]
-        target_mask:         (tensor), shape [224, 224]
-
-    Returns:
-    --------
-        loss: (tensor)
-    """
-    pass
-
-
-
-#=========================================================================================================
-#=========================================================================================================
-#================================ 5. DATA
+#================================ 3. DATA
 
 
 
@@ -277,6 +257,70 @@ Return directly dataset loaders for pytorch models
 next step:
     - data augmentation
 """
+
+
+def clip(img, dtype, maxval):
+    return np.clip(img, 0, maxval).astype(dtype)
+
+
+class DualCompose:
+    def __init__(self, transforms):
+        self.transforms = transforms
+
+    def __call__(self, x, mask=None):
+        for t in self.transforms:
+            x, mask = t(x, mask)
+        return x, mask
+
+
+class VerticalFlip:
+    def __init__(self, prob=0.5):
+        self.prob = prob
+
+    def __call__(self, img, mask=None):
+        if random.random() < self.prob:
+            img = cv2.flip(img, 0)
+            if mask is not None:
+                mask = cv2.flip(mask, 0)
+        return img, mask
+
+
+class HorizontalFlip:
+    def __init__(self, prob=0.5):
+        self.prob = prob
+
+    def __call__(self, img, mask=None):
+        if random.random() < self.prob:
+            img = cv2.flip(img, 1)
+            if mask is not None:
+                mask = cv2.flip(mask, 1)
+        return img, mask
+
+
+class RandomFlip:
+    def __init__(self, prob=0.5):
+        self.prob = prob
+
+    def __call__(self, img, mask=None):
+        if random.random() < self.prob:
+            d = random.randint(-1, 1)
+            img = cv2.flip(img, d)
+            if mask is not None:
+                mask = cv2.flip(mask, d)
+        return img, mask
+
+
+class Transpose:
+    def __init__(self, prob=0.5):
+        self.prob = prob
+
+    def __call__(self, img, mask=None):
+        if random.random() < self.prob:
+            img = img.transpose(1, 0, 2)
+            if mask is not None:
+                mask = mask.transpose(1, 0, 2)
+        return img, mask
+
 
 
 class CraterDataset(object):
@@ -305,10 +349,16 @@ class CraterDataset(object):
 
 
         # PyTorch loaders
-        self.loader = DataLoader(dataset=TensorDataset(Xtrain, Ytrain),
-                                 batch_size=batch_size,
-                                 shuffle=True,
-                                 num_workers=8)
+        if Ytrain is not None:
+            self.loader = DataLoader(dataset=TensorDataset(Xtrain, Ytrain),
+                                     batch_size=batch_size,
+                                     shuffle=True,
+                                     num_workers=8)
+        else:
+            self.loader = DataLoader(dataset=TensorDataset(Xtrain),
+                         batch_size=batch_size,
+                         shuffle=True,
+                         num_workers=8)
 
 
     def data_augmentation(self):
@@ -321,7 +371,7 @@ class CraterDataset(object):
 
 
 #=========================================================================================================
-#================================ 6. OBJECT DETECTOR
+#================================ 4. OBJECT DETECTOR
 
 
 
@@ -435,15 +485,24 @@ class ObjectDetector(object):
         self.net.eval()
 
         # Processing data
-        self.batches = CraterDataset(Xtest, 8)
+        batches = CraterDataset(Xtest, 8)
 
-        # Raw prediction (using sigmoid activation since not in forward)
-        to_proba = nn.sigmoid()
+        Ytest = []
 
-        # Get predicted mask
+        # Running model
+        for inputs in batches.loader:
 
-        # From mask to circles
+            confidences = self.net(inputs)
 
+            for image_idx in range(inputs.size(0)):
+
+                # Get predicted mask
+                prediction = get_prediction(pred, 0.3)
+
+                # From mask to circles
+
+                # Final format
+                Ytest.append(circle)
 
 
     def save_models(self, epoch):
