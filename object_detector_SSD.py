@@ -663,6 +663,16 @@ class CraterDataset(object):
 
     def __init__(self, Xtrain, batch_size=8, Ytrain=None):
 
+        if Ytrain is not None:
+            
+            # Keeping only pictures that includes a crater for training
+            with_crater = np.isin(np.arange(Xtrain.shape[0]), np.unique(Ytrain[:, 0]))
+            Xtrain = Xtrain[with_crater]
+
+            # Keeping y index coherent
+            replace = dict([(k, v) for k, v in zip(np.unique(Ytrain[:, 0]), np.arange(Ytrain.shape[0]))])
+            Ytrain[:, 0] = [replace[i] for i in Ytrain[:, 0]]
+
         # Index
         idx = torch.arange(0, Xtrain.shape[0], dtype=torch.float)
 

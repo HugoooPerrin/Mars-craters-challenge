@@ -7,27 +7,20 @@
 Mars craters ramp challenge 2018
 
 
-(Simplified) Single Shot MultiBox Detector (SSD) implementation on pytorch
-    - Only one class to predict 
-    - Circles instead of boxes => fewer priors (2100)
-    - Smaller priors to better fit the data
+U-net architecture for pixel-level crater detection
 
 
 
 Original paper:
 
-Wei Liu, Dragomir Anguelov, Dumitru Erhan, Christian Szegedy, Scott Reed, Cheng-Yang Fu, Alexander C. Berg
-SSD: Single Shot MultiBox Detector
-29 Dec 2016
-https://arxiv.org/pdf/1512.02325.pdf
-
+U-Net: Convolutional Networks for Biomedical Image Segmentation
+https://arxiv.org/pdf/1505.04597.pdf
 
 
 Main reference for pytorch implementation:
 
-https://towardsdatascience.com/learning-note-single-shot-multibox-detector-with-pytorch-part-1-38185e84bd79
-https://github.com/amdegroot/ssd.pytorch/
 https://github.com/timctho/unet-pytorch/
+https://www.kaggle.com/windsurfer/baseline-u-net-on-pytorch/
 """
 
 
@@ -72,82 +65,10 @@ def diff(t_a, t_b):
     return '{h}h {m}m {s}s'.format(h=t_diff.hours, m=t_diff.minutes, s=t_diff.seconds)
 
 
-#=========================================================================================================
-#=========================================================================================================
-#================================ 1. PRIORS
-
-
-
-config = {                           
-    'feature_maps' : [56, 28],       # Feature maps sizes (x.shape)
-    'min_dim'      : 224,            # Image size                           
-    'steps'        : [4, 8],                                                   
-    'min_sizes'    : [6, 7.5],       # Min radius for all receptive fields                                             
-    'max_sizes'    : [9, 11],        # Max radius for all receptive fields                                            
-    'variance'     : [0.1],                                  
-    'clip'         : True,                                                   
-    'name'         : 'config'}
-
-
-class PriorCircle(object):
-    """
-    Compute prior circle coordinates in center-offset form for each source feature map
-    All is normalized by the image size (224)
-
-    In this case priors are not different scales/aspect ratio boxes but circles
-    There are 2 circles for each feature map element
-
-    Arguments:
-    ----------
-        config : dictionary
-            see above dictionary
-
-    Returns:
-    --------
-        output: torch tensor of shape (number of feature map elements, 3)
-
-    """
-    def __init__(self, config):
-        super(PriorCircle, self).__init__()
-        
-        self.image_size = config['min_dim']
-        self.num_priors = 2
-        self.variance = config['variance']
-        self.feature_maps = config['feature_maps']
-        self.min_sizes = config['min_sizes']
-        self.max_sizes = config['max_sizes']
-        self.steps = config['steps']
-        self.clip = config['clip']
-        self.version = config['name']
-
-    def forward(self):
-        mean = []
-        for k, f in enumerate(self.feature_maps):
-            for i, j in product(range(f), repeat=2):
-                f_k = self.image_size / self.steps[k]
-                
-                # Unit center x,y
-                cx = (j + 0.5) / f_k
-                cy = (i + 0.5) / f_k
-
-                # Radius
-                s_k1 = self.min_sizes[k] / self.image_size
-                s_k2 = self.max_sizes[k] / self.image_size
-                mean += [cx, cy, s_k1]
-                mean += [cx, cy, s_k2]
-                    
-        # Back to torch land
-        output = torch.Tensor(mean).view(-1, 3)
-        if self.clip:
-            output.clamp_(max=1, min=0)
-            
-        return output
-
-
 
 #=========================================================================================================
 #=========================================================================================================
-#================================ 2. NEURAL NETWORK
+#================================ 1. NEURAL NETWORK
 
 
 
@@ -207,216 +128,110 @@ class UNet_up_block(nn.Module):
     
 class Unet(nn.Module):
     
-    def __init__(self, num_priors):
+    def __init__(self):
         """
         U-net for prior level prediction
-
-        Arguments:
-        -----------
-            num_priors           : int
         
         Returns:
         --------
-            confidences : confidence score for each prior
+            confidences : confidence score for each pixel
         """
         super(Unet, self).__init__()
 
         self.down_block1 = UNet_down_block(1, 16, False)
         self.down_block2 = UNet_down_block(16, 32, True)
         self.down_block3 = UNet_down_block(32, 64, True)
+        self.down_block4 = UNet_down_block(64, 128, True)
+        self.down_block5 = UNet_down_block(128, 256, True)
+        self.down_block6 = UNet_down_block(256, 512, True)
 
-        self.mid_conv1 = nn.Conv2d(64, 64, 3, padding=1)
-        self.bn1 = nn.BatchNorm2d(64)
-        self.mid_conv2 = nn.Conv2d(64, 64, 3, padding=1)
-        self.bn2 = nn.BatchNorm2d(64)
+        self.mid_conv1 = torch.nn.Conv2d(512, 512, 3, padding=1)
+        self.bn1 = torch.nn.BatchNorm2d(512)
+        self.mid_conv2 = torch.nn.Conv2d(512, 512, 3, padding=1)
+        self.bn2 = torch.nn.BatchNorm2d(512)
+        self.mid_conv3 = torch.nn.Conv2d(512, 512, 3, padding=1)
+        self.bn3 = torch.nn.BatchNorm2d(512)
 
-        self.up_block1 = UNet_up_block(32, 64, 32)
-        self.up_block2 = UNet_up_block(16, 32, 16)
+        self.up_block1 = UNet_up_block(256, 512, 256)
+        self.up_block2 = UNet_up_block(128, 256, 128)
+        self.up_block3 = UNet_up_block(64, 128, 64)
+        self.up_block4 = UNet_up_block(32, 64, 32)
+        self.up_block5 = UNet_up_block(16, 32, 16)
 
-        self.last_conv1 = nn.Conv2d(16, 16, 3, padding=1)
-        self.last_bn = nn.BatchNorm2d(16)
-        self.last_conv2 = nn.Conv2d(16, 1, 3, padding=1)
+        self.last_conv1 = torch.nn.Conv2d(16, 16, 3, padding=1)
+        self.last_bn = torch.nn.BatchNorm2d(16)
+        self.last_conv2 = torch.nn.Conv2d(16, 1, 3, padding=1)
 
-        self.last_maxpooling = nn.MaxPool2d(2, 2)
-        self.relu = nn.ReLU()
-
-        self.to_confidence = nn.Linear(112 * 112, num_priors)
-
+        self.relu = torch.nn.ReLU()
 
     def forward(self, x):
         """
         X: input image or batch of images. Shape: [batch_size, 1, 224, 224]
         """
-        x1 = self.down_block1(x)
-        x2 = self.down_block2(x1)
-        x3 = self.down_block3(x2)
+        self.x1 = self.down_block1(x)
+        self.x2 = self.down_block2(self.x1)
+        self.x3 = self.down_block3(self.x2)
+        self.x4 = self.down_block4(self.x3)
+        self.x5 = self.down_block5(self.x4)
+        self.x6 = self.down_block6(self.x5)
 
-        x3 = self.relu(self.bn1(self.mid_conv1(x3)))
-        x3 = self.relu(self.bn2(self.mid_conv2(x3)))
+        self.x6 = self.relu(self.bn1(self.mid_conv1(self.x6)))
+        self.x6 = self.relu(self.bn2(self.mid_conv2(self.x6)))
+        self.x6 = self.relu(self.bn3(self.mid_conv3(self.x6)))
 
-        x = self.up_block1(x2, x3)
-        x = self.up_block2(x1, x)
+        x = self.up_block1(self.x5, self.x6)
+        x = self.up_block2(self.x4, x)
+        x = self.up_block3(self.x3, x)
+        x = self.up_block4(self.x2, x)
+        x = self.up_block5(self.x1, x)
 
         x = self.relu(self.last_bn(self.last_conv1(x)))
-        x = self.last_maxpooling(self.last_conv2(x))
-
-        x = x.view(-1, 112 * 112)
-
-        x = self.to_confidence(x)
+        x = self.last_conv2(x)
 
         return x
 
 
 #=========================================================================================================
 #=========================================================================================================
-#================================ 3. MATCHING STRATEGY
+#================================ 2. MATCHING STRATEGY: MASK
 
 
 
-"""
-Functions used to compute the IoU between circles, and to handle the matching
-"""
+def create_circular_mask(center, radius):
+
+    Y, X = np.ogrid[:224, :224]
+    dist_from_center = np.sqrt((X - center[0]) ** 2 + (Y - center[1]) ** 2)
+
+    mask = dist_from_center <= radius + 1
+    return mask
 
 
 
-def compute_intersection(circles_A, circles_B):
-    """
-    Compute intersection area between two circles
+def masking(Xtrain, Ytrain):
     
-    Arguments:
-    ----------
-        circles_A: (tensor) priors,            shapes: [A, 3]
-        circles_B: (tensor) true circles,      shapes: [B, 3]
+    n_images = Xtrain.shape[0]
+    
+    Ytrain_mask = np.zeros((n_images, 1, 224, 224))
+
+    for image in range(n_images):
         
-    Returns:
-    --------
-        intersection: (tensor), intersection area, shape [A, B]
+        circles = Ytrain[Ytrain[:, 0] == image, 1:4]
         
-    Reference:
-    http://mathworld.wolfram.com/Circle-CircleIntersection.html
-    """
-    A = circles_A.size(0)
-    B = circles_B.size(0)
-
-    expanded_A = circles_A.unsqueeze(1).expand(A, B, 3)
-    expanded_B = circles_B.unsqueeze(0).expand(A, B, 3)
-
-    # Center 1
-    x1 = expanded_A[:, :, 0]
-    y1 = expanded_A[:, :, 1]
-
-    # Center 2
-    x2 = expanded_B[:, :, 0]
-    y2 = expanded_B[:, :, 1]
-
-    # Radius
-    rad1 = expanded_A[:, :, 2]
-    rad2 = expanded_B[:, :, 2]
-
-    # Distance between centers
-    dist = torch.sqrt(torch.pow(x1 - x2, 2) + torch.pow(y1 - y2, 2))
+        for circle in circles:
+            x, y, radius = circle
+            mask = create_circular_mask([y, x], radius)
+            Ytrain_mask[image, 0][mask] = 1
+            
+    del Ytrain
     
-    # Love trigo
-    c1 = torch.pow(rad1, 2) * torch.acos((torch.pow(dist, 2) + torch.pow(rad1, 2) - torch.pow(rad2, 2)) /
-                                   (2 * dist * rad1))
-    c2 = torch.pow(rad2, 2) * torch.acos((torch.pow(dist, 2) + torch.pow(rad2, 2) - torch.pow(rad1, 2)) /
-                                       (2 * dist * rad2))
-
-    i = 0.5 * torch.sqrt((-dist + rad1 + rad2) * (dist + rad1 - rad2) *
-                                (dist - rad1 + rad2) * (dist + rad1 + rad2))
-
-    intersection = c1 + c2 - i
+    return Xtrain, Ytrain_mask
     
-    # Get smaller circle for all comparison
-    min_rad = torch.zeros(rad1.shape).to(rad1.device)
-    min_rad[(rad1 < rad2)] = rad1[(rad1 < rad2)]
-    min_rad[(rad1 >= rad2)] = rad2[(rad1 >= rad2)]
-
-    # Get bigger circle for all comparison
-    max_rad = torch.zeros(rad1.shape).to(rad1.device)
-    max_rad[(rad1 < rad2)] = rad2[(rad1 < rad2)]
-    max_rad[(rad1 >= rad2)] = rad1[(rad1 >= rad2)]
-    
-    # If dist is null or smaller contained in bigger one then we take the smaller circle full area
-    condition = (dist == 0) | ((min_rad + dist) <= max_rad)
-    intersection[condition] = torch.pow(min_rad[condition], 2) * pi
-
-    # All extreme cases (no common area, null radius, etc...)
-    intersection[torch.isnan(intersection)] = 0
-    
-    return intersection
 
 
-
-def compute_IoU(circles_A, circles_B):
-    """
-    Compute intersection over Union (IoU) area between two circles
-    
-    Arguments:
-    ----------
-        circles_A: (tensor) priors,            shapes: [A, 3]
-        circles_B: (tensor) true circles,      shapes: [B, 3]
-        
-    Returns:
-    --------
-        IoU: (tensor), intersection over Union, shape [A, B]
-    """
-    intersection = compute_intersection(circles_A, circles_B)
-    
-    area_a = (torch.pow(circles_A[:, 2], 2) * pi).unsqueeze(1).expand_as(intersection)
-    area_b = (torch.pow(circles_B[:, 2], 2) * pi).unsqueeze(0).expand_as(intersection)
-    
-    union = area_a + area_b - intersection
-    
-    IoU = intersection / union
-    
-    # All extreme cases (null union)
-    IoU[torch.isnan(IoU)] = 0
-    
-    return IoU
-
-
-
-def match(circles_A, circles_B, threshold=0.5):
-    """
-    Match ground truth circles with predicted ones
-
-    Arguments:
-    ----------
-        circles_A: (tensor) priors,            shapes: [A, 3]
-        circles_B: (tensor) true circles,      shapes: [B, 3]
-        
-    Returns:
-    --------
-        matches: (tensor), shape [A, B] 
-        x(i, j) = 1 if predicted circle i is matched with truth j, else 0
-    """
-    # Compute IoU
-    overlaps = compute_IoU(circles_A, circles_B)
-
-    num_priors = overlaps.size(0)
-    num_true = overlaps.size(1)
-
-    ## Dual step matching
-    # Best ground truth for each prior (shape: [1,num_priors])
-    best_truth_overlap, best_truth_idx = overlaps.max(1, keepdim=True)
-    # Best prior for each ground truth (shape: [1,num_true_craters])
-    best_prior_overlap, best_prior_idx = overlaps.max(0, keepdim=True)
-
-    # Formating
-    best_truth_idx.squeeze_(1)
-    best_truth_overlap.squeeze_(1)
-    best_prior_idx.squeeze_(0)
-    best_prior_overlap.squeeze_(0)
-
-    # Matches: 1 if IoU > threshold or if best match and any IoU > threshold
-    matches = torch.zeros(overlaps.shape).to(circles_A.device)
-    matches[best_prior_idx, [i for i in range(num_true)]] = 1
-    overlaps[overlaps < threshold] = 0
-    overlaps[overlaps >= threshold] = 1
-    matches[matches.sum(dim=1) == 0, :] = overlaps[matches.sum(dim=1) == 0, :]
-
-    return matches
+def get_prediction(confidences, threshold):
+    confidences = nn.Sigmoid()(confidences)
+    prediction = confidences > threshold
+    return prediction
 
 
 
@@ -427,44 +242,24 @@ def match(circles_A, circles_B, threshold=0.5):
 
 
 """
-Computes loss function for classification and regression problem
+Computes loss function for classification problem
 """
 
 
-def circle_loss(predicted_conf, matches):
+def circle_loss(predicted_conf, target_mask):
     """
     Compute the loss between the prediction and the target
 
     Arguments:
     ----------
-        predicted_conf:      (tensor) predicted confidence, shape: [A]
-        matches: (tensor), shape [A, B] 
-            x(i, j) = 1 if predicted circle i is matched with truth j, else 0
+        predicted_conf:      (tensor), shape: [224, 224]
+        target_mask:         (tensor), shape [224, 224]
 
     Returns:
     --------
         loss: (tensor)
     """
-    if matches is not None:
-        conf_loss = nn.BCEWithLogitsLoss(reduction='elementwise_mean')
-
-        target, _ = matches.max(dim=1)
-
-        positive_pred = predicted_conf[target == 1]
-        num_pos = positive_pred.size(0)
-
-        raw_negative_pred = predicted_conf[target == 0]
-
-        # Hard negative mining (reduce the ratio of negative over positive samples to 3:1)
-        num_neg = 3 * num_pos
-        negative_pred = raw_negative_pred.sort(dim=0, descending=True)[0][0:num_neg]
-
-        prediction = torch.cat([positive_pred, negative_pred]).view(-1).to(predicted_conf.device)
-        target = torch.cat([torch.ones(num_pos), torch.zeros(num_neg)]).view(-1).to(predicted_conf.device)
-
-        loss = conf_loss(prediction, target)
-
-        return loss
+    pass
 
 
 
@@ -488,19 +283,29 @@ class CraterDataset(object):
 
     def __init__(self, Xtrain, batch_size=8, Ytrain=None):
 
-        # Index
-        idx = torch.arange(0, Xtrain.shape[0], dtype=torch.float)
+
+        if Ytrain is not None:
+            
+            # Keeping only pictures that includes a crater for training
+            with_crater = np.isin(np.arange(Xtrain.shape[0]), np.unique(Ytrain[:, 0]))
+            Xtrain = Xtrain[with_crater]
+
+            # Keeping y index coherent
+            replace = dict([(k, v) for k, v in zip(np.unique(Ytrain[:, 0]), np.arange(Ytrain.shape[0]))])
+            Ytrain[:, 0] = [replace[i] for i in Ytrain[:, 0]]
+
+            Xtrain, Ytrain = masking(Xtrain, Ytrain)
 
         # To torch tensor & normalization
         Xtrain = torch.tensor(Xtrain / 255, dtype=torch.float).unsqueeze(1)
         if Ytrain is not None:
-            self.Ytrain = torch.tensor(Ytrain, dtype=torch.float)
+            Ytrain = torch.tensor(Ytrain, dtype=torch.float)
 
         # Data augmentation (to come)
 
 
         # PyTorch loaders
-        self.loader = DataLoader(dataset=TensorDataset(Xtrain, idx),
+        self.loader = DataLoader(dataset=TensorDataset(Xtrain, Ytrain),
                                  batch_size=batch_size,
                                  shuffle=True,
                                  num_workers=8)
@@ -534,8 +339,7 @@ Main class of the script:
 
 BATCH_SIZE = 16
 NUM_EPOCHS = 10
-LEARNING_RATE = 1e-3
-LEARNING_RATE_DECAY = 0.95
+LEARNING_RATE = 5e-4
 
 MOMENTUM = 0.9
 WEIGHT_DECAY = 1e-4
@@ -558,20 +362,15 @@ class ObjectDetector(object):
             self.device = 'cpu'
             print('WARNING: Optimization on CPU will be much slower')
 
-        # Creating priors
-        print('Creating priors', end='...')
-        self.priors = PriorCircle(config).forward().to(self.device)
-        print('done')
-
         # Creating and initializing neural network
         print('Creating neural network on {}'.format(d), end='...')
-        self.net = Unet(self.priors.shape[0]).to(self.device)
+        self.net = Unet().to(self.device)
         print('done')
 
         # Count the number of parameters in the network
         model_parameters = filter(lambda p: p.requires_grad, self.net.parameters())
         params = sum([np.prod(p.size()) for p in model_parameters])
-        print('>> Learning: {} parameters'.format(params))
+        print('>> Learning: {} parameters\n'.format(params))
 
 
     def fit(self, Xtrain, Ytrain):
@@ -579,60 +378,36 @@ class ObjectDetector(object):
         # Processing data
         batches = CraterDataset(Xtrain, BATCH_SIZE, Ytrain)
 
+        # Loss
+        criterion = nn.BCEWithLogitsLoss()
+
+        # Optimizer
+        optimizer = optim.SGD(self.net.parameters(), lr=LEARNING_RATE,
+                                                     momentum=MOMENTUM,
+                                                     weight_decay=WEIGHT_DECAY)
+
         # Optimizing
         time = datetime.now()
         step_number = 0
         for epoch in range(NUM_EPOCHS):
 
-            # Optimizer
-            optimizer = optim.SGD(self.net.parameters(), lr=LEARNING_RATE * LEARNING_RATE_DECAY ** epoch)
-                                                 # momentum=MOMENTUM,
-                                                 # weight_decay=WEIGHT_DECAY)
-
-            print('Current learning rate: %.6f' % (LEARNING_RATE * LEARNING_RATE_DECAY ** epoch))
-
             step_number = 0
             running_loss = 0.0
             
-            for inputs, idx in batches.loader:
+            for inputs, targets in batches.loader:
                 self.net.train()
 
                 # Variable
                 inputs = Variable(inputs).to(self.device)
+                targets = Variable(targets).to(self.device)
 
                 # Zero the parameter gradients
                 optimizer.zero_grad()
 
                 # Forward
-                confidence = self.net(inputs)
+                confidences = self.net(inputs)
 
-                loss = 0
-
-                # Loop on batch
-                for image_idx in range(inputs.size(0)):
-
-                    # Get true craters
-                    current_label_idx = idx[image_idx]
-                    true_circles = batches.Ytrain[batches.Ytrain[:, 0] == current_label_idx, 1:4] / 224
-                    n_true = true_circles.size(0)
-                    true_circles = Variable(true_circles).to(self.device)
-
-                    # Get prediction
-                    predicted_conf = confidence[image_idx]
-
-                    # Matching
-                    if n_true != 0:
-                        matches = match(self.priors, true_circles, threshold=0.2)
-                    else:
-                        matches = None
-
-                    # Image loss
-                    image_loss = circle_loss(predicted_conf, matches)
-
-                    # Batch loss
-                    loss += image_loss / BATCH_SIZE
-
-                del inputs, idx
+                loss = criterion(confidences, targets)
 
                 # Backward 
                 loss.backward()
@@ -650,23 +425,28 @@ class ObjectDetector(object):
 
             self.save_models(epoch)
 
-        print('\nTraining time {}'.format(diff(datetime.now(), time)))
+            print('Training time {}\n'.format(diff(datetime.now(), time)))
 
 
 
     def predict(self, Xtest):
         
+        # No longer in training
+        self.net.eval()
+
         # Processing data
         self.batches = CraterDataset(Xtest, 8)
 
         # Raw prediction (using sigmoid activation since not in forward)
         to_proba = nn.sigmoid()
 
-        # NMS
+        # Get predicted mask
+
+        # From mask to circles
 
 
 
     def save_models(self, epoch):
         print('\nSaving model', end='...')
         torch.save(self.net.state_dict(), "../models/craters_{}.model".format(epoch))
-        print('done\n')
+        print('done')
