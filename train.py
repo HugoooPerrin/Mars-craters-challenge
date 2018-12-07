@@ -10,7 +10,7 @@ import pandas as pd
 import numpy as np 
 
 # Object detector
-from object_detector_Unet_pixel_level import *
+from object_detector_Unet import *
 
 #=========================================================================================================
 #================================ 1. DATA

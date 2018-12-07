@@ -56,6 +56,10 @@ from math import sqrt
 from math import pi
 
 # Utils
+import random
+import cv2
+import imutils
+from math import floor
 from typing import List, Tuple
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
@@ -215,7 +219,7 @@ def masking(Xtrain, Ytrain):
     """
     n_images = Xtrain.shape[0]
     
-    Ytrain_mask = np.zeros((n_images, 1, 224, 224))
+    Ytrain_mask = np.zeros((n_images, 224, 224))
 
     for image in range(n_images):
         
@@ -224,7 +228,7 @@ def masking(Xtrain, Ytrain):
         for circle in circles:
             x, y, radius = circle
             mask = create_circular_mask([y, x], radius)
-            Ytrain_mask[image, 0][mask] = 1
+            Ytrain_mask[image][mask] = 1
             
     del Ytrain
     
@@ -242,6 +246,40 @@ def get_prediction(confidences, threshold):
     return prediction
 
 
+def bounding_circles(prediction):
+
+    contours = cv2.findContours(prediction.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours = imutils.grab_contours(contours)
+    
+    boxes = []
+    circles = []
+
+    for i in range(len(contours)):
+        try:
+            cnt = contours[i]
+            x, y, w, h = cv2.boundingRect(cnt)
+            boxes.append((x, y, w, h))
+        except:
+            pass
+
+    def box_to_circle(box):
+        x, y, w, h = box
+        distorsion = max(w, h) / min(w, h)
+        if distorsion < 3:
+            radius = floor(max(w, h) / 2)
+            return (y + radius, x + radius, radius + 1)
+        else:
+            return None
+
+    for box in boxes:
+        circle = box_to_circle(box)
+        if circle is not None:
+            _, _, radius = circle
+            if (radius > 4) & (radius < 28):
+                circles.append(circle)
+    
+    return circles
+
 
 #=========================================================================================================
 #=========================================================================================================
@@ -250,55 +288,12 @@ def get_prediction(confidences, threshold):
 
 
 """
-Handles grayscaling to obtain 3 channels images
-
 Return directly dataset loaders for pytorch models
-
-next step:
-    - data augmentation
 """
 
 
-def clip(img, dtype, maxval):
-    return np.clip(img, 0, maxval).astype(dtype)
-
-
-class DualCompose:
-    def __init__(self, transforms):
-        self.transforms = transforms
-
-    def __call__(self, x, mask=None):
-        for t in self.transforms:
-            x, mask = t(x, mask)
-        return x, mask
-
-
-class VerticalFlip:
-    def __init__(self, prob=0.5):
-        self.prob = prob
-
-    def __call__(self, img, mask=None):
-        if random.random() < self.prob:
-            img = cv2.flip(img, 0)
-            if mask is not None:
-                mask = cv2.flip(mask, 0)
-        return img, mask
-
-
-class HorizontalFlip:
-    def __init__(self, prob=0.5):
-        self.prob = prob
-
-    def __call__(self, img, mask=None):
-        if random.random() < self.prob:
-            img = cv2.flip(img, 1)
-            if mask is not None:
-                mask = cv2.flip(mask, 1)
-        return img, mask
-
-
 class RandomFlip:
-    def __init__(self, prob=0.5):
+    def __init__(self, prob=0.66):
         self.prob = prob
 
     def __call__(self, img, mask=None):
@@ -310,17 +305,16 @@ class RandomFlip:
         return img, mask
 
 
-class Transpose:
-    def __init__(self, prob=0.5):
+class RandomBrightness:
+    def __init__(self, limit=0.1, prob=1):
+        self.limit = limit
         self.prob = prob
 
-    def __call__(self, img, mask=None):
+    def __call__(self, img):
         if random.random() < self.prob:
-            img = img.transpose(1, 0, 2)
-            if mask is not None:
-                mask = mask.transpose(1, 0, 2)
-        return img, mask
-
+            alpha = 1.0 + self.limit * random.uniform(-1, 1)
+            img[..., :3] = alpha * img[..., :3]
+        return img
 
 
 class CraterDataset(object):
@@ -340,12 +334,41 @@ class CraterDataset(object):
 
             Xtrain, Ytrain = masking(Xtrain, Ytrain)
 
+
+        # Data augmentation
+        augment = False
+        concatenate = False
+
+        if augment:
+            if Ytrain is not None:
+                flip = RandomFlip()
+
+                if concatenate:
+                    Xtrain_transform = np.zeros(Xtrain.shape)
+                    Ytrain_transform = np.zeros(Ytrain.shape)
+
+                    for image in range(Xtrain.shape[0]):
+                        Xtrain_transform[image], Ytrain_transform[image] = flip(Xtrain[image], Ytrain[image])
+                    
+                    light = RandomBrightness(limit=0.01*255)
+                    Xtrain_transform = light(Xtrain_transform)
+
+                    Xtrain = np.concatenate((Xtrain, Xtrain_transform), axis=0)
+                    Ytrain = np.concatenate((Ytrain, Ytrain_transform), axis=0)
+
+                else:
+                    for image in range(Xtrain.shape[0]):
+                        Xtrain[image], Ytrain[image] = flip(Xtrain[image], Ytrain[image])
+                    
+                    light = RandomBrightness(limit=1*255)
+                    Xtrain = light(Xtrain)
+
+
         # To torch tensor & normalization
         Xtrain = torch.tensor(Xtrain / 255, dtype=torch.float).unsqueeze(1)
-        if Ytrain is not None:
-            Ytrain = torch.tensor(Ytrain, dtype=torch.float)
 
-        # Data augmentation (to come)
+        if Ytrain is not None:
+            Ytrain = torch.tensor(Ytrain, dtype=torch.float).unsqueeze(1)
 
 
         # PyTorch loaders
@@ -357,17 +380,10 @@ class CraterDataset(object):
         else:
             self.loader = DataLoader(dataset=TensorDataset(Xtrain),
                          batch_size=batch_size,
-                         shuffle=True,
+                         shuffle=False,
                          num_workers=8)
 
-
-    def data_augmentation(self):
-        """
-        Set of transformations of data needed to improve 
-        training stability and robustness
-        """
-        pass
-
+        del Xtrain, Ytrain
 
 
 #=========================================================================================================
@@ -389,7 +405,7 @@ Main class of the script:
 
 BATCH_SIZE = 16
 NUM_EPOCHS = 10
-LEARNING_RATE = 5e-4
+LEARNING_RATE = 4e-4  # Next try (previous: 3e-4 => 0.0516)
 
 MOMENTUM = 0.9
 WEIGHT_DECAY = 1e-4
@@ -425,6 +441,8 @@ class ObjectDetector(object):
 
     def fit(self, Xtrain, Ytrain):
 
+        self.net.train()
+
         # Processing data
         batches = CraterDataset(Xtrain, BATCH_SIZE, Ytrain)
 
@@ -445,7 +463,6 @@ class ObjectDetector(object):
             running_loss = 0.0
             
             for inputs, targets in batches.loader:
-                self.net.train()
 
                 # Variable
                 inputs = Variable(inputs).to(self.device)
@@ -479,30 +496,46 @@ class ObjectDetector(object):
 
 
 
-    def predict(self, Xtest):
+    def predict(self, Xtest, threshold=0.35):
         
         # No longer in training
         self.net.eval()
 
         # Processing data
-        batches = CraterDataset(Xtest, 8)
+        batches = CraterDataset(Xtest, BATCH_SIZE)
 
         Ytest = []
 
         # Running model
+        Ytest = np.zeros((1, 4))
+        idx = 0
+
         for inputs in batches.loader:
-
+            inputs = inputs[0].to(self.device)
             confidences = self.net(inputs)
-
+            
             for image_idx in range(inputs.size(0)):
+                
+                conf = confidences[image_idx].squeeze()
+                
+                prediction = get_prediction(conf, threshold)
+                prediction = prediction.cpu().numpy()
+                circles = bounding_circles(prediction)
+                
+                n_circles = len(circles)
+                
+                if n_circles != 0:
+                    rank = np.array([[idx]] * n_circles)
+                    circles = np.concatenate((rank, circles), axis=1)
 
-                # Get predicted mask
-                prediction = get_prediction(pred, 0.3)
+                    Ytest = np.concatenate((Ytest, circles), axis=0)
+                    
+                idx += 1
+                
+        Ytest = Ytest[1:]
 
-                # From mask to circles
+        return Ytest
 
-                # Final format
-                Ytest.append(circle)
 
 
     def save_models(self, epoch):
