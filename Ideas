@@ -34,6 +34,11 @@ Model:
     - YOLO
 
 
+Stop deep learning: 
+    - skimage
+      http://scikit-image.org/docs/dev/auto_examples/edges/plot_circular_elliptical_hough_transform.html#sphx-glr-auto-examples-edges-plot-circular-elliptical-hough-transform-py
+
+
 Data:
     - Feature extraction
     - Data augmentation

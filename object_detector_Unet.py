@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+# !/usr/bin/env python
 # -*- coding: utf-8 -*-
 
 
@@ -31,11 +31,11 @@ https://www.kaggle.com/windsurfer/baseline-u-net-on-pytorch/
 
 
 
-# Basics
+# Basics
 import numpy as np
 import pandas as pd
 
-# Pytorch framework
+# Pytorch framework
 import torch
 import torch.nn as nn
 import torchvision
@@ -50,7 +50,7 @@ from torch.utils.data import TensorDataset, DataLoader
 
 from torchvision.transforms import Normalize
 
-# Mathematic tools
+# Mathematic tools
 from itertools import product as product
 from math import sqrt
 from math import pi
@@ -129,16 +129,16 @@ class UNet_up_block(nn.Module):
         x = self.relu(self.bn3(self.conv3(x)))
         return x
 
-    
+
 class Unet(nn.Module):
-    
+
     def __init__(self):
         """
         U-net for prior level prediction
-        
+
         Returns:
         --------
-            confidences : confidence score for each pixel
+            confidences: confidence score for each pixel
         """
         super(Unet, self).__init__()
 
@@ -218,22 +218,31 @@ def masking(Xtrain, Ytrain):
     Create the mask labels for all images and craters
     """
     n_images = Xtrain.shape[0]
-    
+
+    with_craters = []
+    n_with_craters = 0
     Ytrain_mask = np.zeros((n_images, 224, 224))
 
     for image in range(n_images):
+
+        circles = Ytrain[image]
         
-        circles = Ytrain[Ytrain[:, 0] == image, 1:4]
+        n_circles = len(circles)
         
-        for circle in circles:
-            x, y, radius = circle
-            mask = create_circular_mask([y, x], radius)
-            Ytrain_mask[image][mask] = 1
+        if n_circles != 0:
+            n_with_craters += 1
+            with_craters.append(image)
             
-    del Ytrain
-    
+            for circle in circles:
+                x, y, radius = circle
+                mask = create_circular_mask([y, x], radius)
+                Ytrain_mask[image][mask] = 1
+                
+    Ytrain_mask = Ytrain_mask[with_craters]
+    Xtrain = Xtrain[with_craters]
+
     return Xtrain, Ytrain_mask
-    
+
 
 
 def get_prediction(confidences, threshold):
@@ -250,7 +259,7 @@ def bounding_circles(prediction):
 
     contours = cv2.findContours(prediction.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     contours = imutils.grab_contours(contours)
-    
+
     boxes = []
     circles = []
 
@@ -265,9 +274,9 @@ def bounding_circles(prediction):
     def box_to_circle(box):
         x, y, w, h = box
         distorsion = max(w, h) / min(w, h)
-        if distorsion < 3:
+        if distorsion < 4:
             radius = floor(max(w, h) / 2)
-            return (y + radius, x + radius, radius + 1)
+            return (y + radius, x + radius, radius)
         else:
             return None
 
@@ -275,9 +284,9 @@ def bounding_circles(prediction):
         circle = box_to_circle(box)
         if circle is not None:
             _, _, radius = circle
-            if (radius > 4) & (radius < 28):
+            if (radius > 4) & (radius < 50):
                 circles.append(circle)
-    
+
     return circles
 
 
@@ -312,8 +321,8 @@ class RandomBrightness:
 
     def __call__(self, img):
         if random.random() < self.prob:
-            alpha = 1.0 + self.limit * random.uniform(-1, 1)
-            img[..., :3] = alpha * img[..., :3]
+            alpha = 1 + self.limit * random.uniform(-1, 1)
+            img = alpha * img
         return img
 
 
@@ -321,36 +330,25 @@ class CraterDataset(object):
 
     def __init__(self, Xtrain, batch_size=8, Ytrain=None):
 
+        # Reformating
+        Xtrain = np.array(Xtrain)
 
         if Ytrain is not None:
-            
-            # Keeping only pictures that includes a crater for training
-            with_crater = np.isin(np.arange(Xtrain.shape[0]), np.unique(Ytrain[:, 0]))
-            Xtrain = Xtrain[with_crater]
-
-            # Keeping y index coherent
-            replace = dict([(k, v) for k, v in zip(np.unique(Ytrain[:, 0]), np.arange(Ytrain.shape[0]))])
-            Ytrain[:, 0] = [replace[i] for i in Ytrain[:, 0]]
-
             Xtrain, Ytrain = masking(Xtrain, Ytrain)
 
-
-        # Data augmentation
-        augment = False
-        concatenate = False
-
-        if augment:
+        # Data augmentation
+        if AUGMENTATION:
             if Ytrain is not None:
                 flip = RandomFlip()
 
-                if concatenate:
+                if CONCATENATE:
                     Xtrain_transform = np.zeros(Xtrain.shape)
                     Ytrain_transform = np.zeros(Ytrain.shape)
 
                     for image in range(Xtrain.shape[0]):
                         Xtrain_transform[image], Ytrain_transform[image] = flip(Xtrain[image], Ytrain[image])
-                    
-                    light = RandomBrightness(limit=0.01*255)
+
+                    light = RandomBrightness(limit=0.01 * 255)
                     Xtrain_transform = light(Xtrain_transform)
 
                     Xtrain = np.concatenate((Xtrain, Xtrain_transform), axis=0)
@@ -359,8 +357,8 @@ class CraterDataset(object):
                 else:
                     for image in range(Xtrain.shape[0]):
                         Xtrain[image], Ytrain[image] = flip(Xtrain[image], Ytrain[image])
-                    
-                    light = RandomBrightness(limit=1*255)
+
+                    light = RandomBrightness(limit=0.01 * 255)
                     Xtrain = light(Xtrain)
 
 
@@ -371,7 +369,7 @@ class CraterDataset(object):
             Ytrain = torch.tensor(Ytrain, dtype=torch.float).unsqueeze(1)
 
 
-        # PyTorch loaders
+        # PyTorch loaders
         if Ytrain is not None:
             self.loader = DataLoader(dataset=TensorDataset(Xtrain, Ytrain),
                                      batch_size=batch_size,
@@ -403,9 +401,30 @@ Main class of the script:
 
 # HYPERPARAMETERS
 
+AUGMENTATION = False
+CONCATENATE = False
+
 BATCH_SIZE = 16
-NUM_EPOCHS = 10
-LEARNING_RATE = 4e-4  # Next try (previous: 3e-4 => 0.0516)
+NUM_EPOCHS = 50
+LEARNING_RATE = 6e-4
+
+# (10 epochs: 3e-4 => 0.0516,
+            # 4e-4 => 0.0463,
+            # 5e-4 => 0.0420,
+            # 6e-4 => 0.0400)
+
+# (20 epochs: 4e-4 => 0.0370,
+            # 5e-4 => 0.0260 / 0.0340 (?),
+            # 5.5e-4 => 0.0310)
+
+# (30 epochs: 5e-4 => 0.0269,
+            # 6e-4 => )
+
+# (40 epochs: 5e-4 => 0.0240,
+            # 6e-4 => )
+
+# (50 epochs: 5e-4 => 0.0212,
+            # 6e-4 => )
 
 MOMENTUM = 0.9
 WEIGHT_DECAY = 1e-4
@@ -436,16 +455,16 @@ class ObjectDetector(object):
         # Count the number of parameters in the network
         model_parameters = filter(lambda p: p.requires_grad, self.net.parameters())
         params = sum([np.prod(p.size()) for p in model_parameters])
-        print('>> Learning: {} parameters\n'.format(params))
+        print('>> {} parameters\n'.format(params))
 
 
     def fit(self, Xtrain, Ytrain):
 
         self.net.train()
 
-        # Processing data
+        # Processing data
         batches = CraterDataset(Xtrain, BATCH_SIZE, Ytrain)
-
+        
         # Loss
         criterion = nn.BCEWithLogitsLoss()
 
@@ -461,10 +480,10 @@ class ObjectDetector(object):
 
             step_number = 0
             running_loss = 0.0
-            
+
             for inputs, targets in batches.loader:
 
-                # Variable
+                # Variable
                 inputs = Variable(inputs).to(self.device)
                 targets = Variable(targets).to(self.device)
 
@@ -476,7 +495,7 @@ class ObjectDetector(object):
 
                 loss = criterion(confidences, targets)
 
-                # Backward 
+                # Backward
                 loss.backward()
 
                 # Optimize
@@ -487,8 +506,14 @@ class ObjectDetector(object):
                 step_number += 1
 
                 if step_number % DISPLAY_STEP == 0:
-                    print('Epoch: %d  |  step: %4d  |  mean training loss: %.4f' % 
+                    print('Epoch: %d  |  step: %4d  |  training loss: %.4f' % 
                           (epoch, step_number, running_loss / step_number))
+
+            # Processing data
+            # (Different randomized transformation at each epoch)
+            if AUGMENTATION:
+                del batches
+                batches = CraterDataset(Xtrain, BATCH_SIZE, Ytrain)
 
             self.save_models(epoch)
 
@@ -497,44 +522,45 @@ class ObjectDetector(object):
 
 
     def predict(self, Xtest, threshold=0.35):
-        
+
         # No longer in training
         self.net.eval()
 
-        # Processing data
+        # Processing data
         batches = CraterDataset(Xtest, BATCH_SIZE)
 
-        Ytest = []
+        Ypred = []
 
         # Running model
-        Ytest = np.zeros((1, 4))
         idx = 0
 
         for inputs in batches.loader:
             inputs = inputs[0].to(self.device)
             confidences = self.net(inputs)
-            
+
             for image_idx in range(inputs.size(0)):
-                
+
                 conf = confidences[image_idx].squeeze()
-                
+
                 prediction = get_prediction(conf, threshold)
                 prediction = prediction.cpu().numpy()
                 circles = bounding_circles(prediction)
-                
+
                 n_circles = len(circles)
-                
+
                 if n_circles != 0:
-                    rank = np.array([[idx]] * n_circles)
+                    rank = np.array([[0.75]] * n_circles)
                     circles = np.concatenate((rank, circles), axis=1)
 
-                    Ytest = np.concatenate((Ytest, circles), axis=0)
-                    
-                idx += 1
-                
-        Ytest = Ytest[1:]
+                Ypred.append(circles)
 
-        return Ytest
+        Ypred = np.array(Ypred)
+
+        return Ypred
+
+
+    def find_best_threshold(Xtrain, Ytrain):
+        pass
 
 
 
