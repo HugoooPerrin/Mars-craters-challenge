@@ -81,8 +81,8 @@ config = {
     'feature_maps' : [28, 14, 7, 4, 2, 1],       # Feature maps sizes (x.shape)
     'min_dim'      : 224,                        # Image size                           
     'steps'        : [8, 16, 32, 56, 112, 224],                                                   
-    'min_sizes'    : [7, 7, 7, 7, 7, 7],         # Min radius for all receptive fields                                             
-    'max_sizes'    : [10, 10, 10, 10, 10, 10],   # Max radius for all receptive fields                                            
+    'min_sizes'    : [7, 8, 9, 10, 11, 13],         # Min radius for all receptive fields                                             
+    'max_sizes'    : [10, 11, 12, 13, 14, 20],      # Max radius for all receptive fields                                            
     'variance'     : [0.1],                                  
     'clip'         : True,                                                   
     'name'         : 'config'}
@@ -131,9 +131,9 @@ class PriorCircle(object):
 
                 # Radius
                 s_k1 = self.min_sizes[k] / self.image_size
-                #s_k2 = self.max_sizes[k] / self.image_size
+                s_k2 = self.max_sizes[k] / self.image_size
                 mean += [cx, cy, s_k1]
-                #mean += [cx, cy, s_k2]
+                mean += [cx, cy, s_k2]
                     
         # Back to torch land
         output = torch.Tensor(mean).view(-1, 3)
@@ -279,7 +279,7 @@ class SSD(nn.Module):
         return output
 
 
-def create_SSD(config, pretrained=False, device='CPU'):
+def create_SSD(config, pretrained=False, device='cpu'):
 
     """
     Architecture of our coming SSD neural network
@@ -335,7 +335,7 @@ def create_SSD(config, pretrained=False, device='CPU'):
     
     # Compute the location of all circles at different feature scale
     # (cx, cy, cr)
-    k = 1
+    k = 2
 
     location_headers = nn.ModuleList([
         nn.Conv2d(in_channels=512, out_channels=k * 3, kernel_size=3, padding=1),
@@ -537,6 +537,9 @@ def encode_ground_truth(true_circles, prior, matches):
         goal: (tensor) encoded goals for learning, shape [n_matches, 3]
     """
 
+    # To prevent explosion in log
+    epsilon = 1e-10
+
     target, indices = matches.max(dim=1)
 
     # Corresponding ground truth data for every prior
@@ -544,7 +547,7 @@ def encode_ground_truth(true_circles, prior, matches):
 
     # formating for loss
     g_cxcy = (goal[target == 1, :2] - prior[target == 1, :2]) / (2 * prior[target == 1, 2:] * 0.1)
-    g_rad = torch.log((goal[target == 1, 2:] / (2 * prior[target == 1, 2:]))) / 0.1
+    g_rad = torch.log((goal[target == 1, 2:] / (2 * prior[target == 1, 2:])) + epsilon) / 0.1
 
     # Shape [num_priors, 3]
     goal = torch.cat([g_cxcy, g_rad], 1)
@@ -592,54 +595,33 @@ def multi_circle_loss(pred_loc, goal, conf, matches, alpha=1):
     --------
         loss: (tensor)
     """
-    if goal is not None:
 
-        ## Confidence loss
-        conf_loss = nn.BCEWithLogitsLoss(reduction='sum')
-        # conf_loss = nn.SoftMarginLoss(reduction='sum')
+    ## Confidence loss
+    conf_loss = nn.BCEWithLogitsLoss()
 
-        target, indices = matches.max(dim=1)
+    target, indices = matches.max(dim=1)
 
-        positive_pred = conf[target == 1]
-        num_pos = positive_pred.size(0)
+    positive_pred = conf[target == 1]
+    num_pos = positive_pred.size(0)
 
-        raw_negative_pred = conf[target == 0]
-        raw_num_neg = raw_negative_pred.size(0)
+    raw_negative_pred = conf[target == 0]
+    raw_num_neg = raw_negative_pred.size(0)
 
-        # Hard negative mining (reduce the ratio of negative over positive samples to k:1)
-        num_neg = min(4 * num_pos, raw_num_neg)
-        negative_pred = raw_negative_pred.sort(dim=0, descending=True)[0][0:num_neg]
+    # Hard negative mining (reduce the ratio of negative over positive samples to 4:1)
+    num_neg = min(4 * num_pos, raw_num_neg)
+    negative_pred = raw_negative_pred.sort(dim=0, descending=True)[0][0:num_neg]
 
-        prediction = torch.cat([positive_pred, negative_pred]).view(-1).to(pred_loc.device)
-        target_conf = torch.cat([torch.ones(num_pos), torch.zeros(num_neg)]).view(-1).to(pred_loc.device)
-        # target_conf = torch.cat([torch.ones(num_pos), -1 * torch.ones(num_neg)]).view(-1).to(pred_loc.device)
+    prediction = torch.cat([positive_pred, negative_pred]).view(-1).to(pred_loc.device)
+    target_conf = torch.cat([torch.ones(num_pos), torch.zeros(num_neg)]).view(-1).to(pred_loc.device)
 
-        image_conf_loss = conf_loss(prediction, target_conf) / num_pos
+    image_conf_loss = conf_loss(prediction, target_conf) / num_pos
 
-        ## Location loss (offsets for [cx, cy, log(rad)] to learn)
-        pred_loc = pred_loc[target == 1]
+    ## Location loss (offsets for [cx, cy, log(rad)] to learn)
+    pred_loc = pred_loc[target == 1]
 
-        image_loc_loss = F.smooth_l1_loss(pred_loc, goal, reduction='sum') / num_pos
+    image_loc_loss = F.smooth_l1_loss(pred_loc, goal)
 
-        # print('Conf: %.2f, loc: %.2f' % (image_conf_loss, image_loc_loss))
-
-        return image_conf_loss + alpha * image_loc_loss
-
-    # We want to use even empty images: keep only best negative confidence to "reduce it"
-    else:
-
-        # print('STOP: should not be here !!')
-
-        ## Confidence loss (only)
-        conf_loss = nn.BCEWithLogitsLoss(reduction='mean')
-        num_neg = 3
-
-        negative_pred = conf.sort(dim=0, descending=True)[0][0:num_neg].view(-1)
-        target_conf = torch.zeros(num_neg).view(-1).to(pred_loc.device)
-
-        image_conf_loss = conf_loss(negative_pred, target_conf)
-
-        return image_conf_loss
+    return image_conf_loss + alpha * image_loc_loss
 
 
 
@@ -653,39 +635,54 @@ def multi_circle_loss(pred_loc, goal, conf, matches, alpha=1):
 Handles grayscaling to obtain 3 channels images
 
 Return directly dataset loaders for pytorch models
-
-next step:
-    - data augmentation
 """
 
 
 class CraterDataset(object):
 
-    def __init__(self, Xtrain, batch_size=8, Ytrain=None):
+    def __init__(self, Xtrain, batch_size=16, Ytrain=None):
+
+        # Reformating
+        Xtrain = np.array(Xtrain)
 
         if Ytrain is not None:
             
             # Keeping only pictures that includes a crater for training
-            with_crater = np.isin(np.arange(Xtrain.shape[0]), np.unique(Ytrain[:, 0]))
-            Xtrain = Xtrain[with_crater]
+            n_images = Xtrain.shape[0]
 
-            # Keeping y index coherent
-            replace = dict([(k, v) for k, v in zip(np.unique(Ytrain[:, 0]), np.arange(Ytrain.shape[0]))])
-            Ytrain[:, 0] = [replace[i] for i in Ytrain[:, 0]]
+            with_craters = []
+            idx = 0
+            Ytrain_reformated = np.zeros((1, 4))
+
+            for image in range(n_images):
+
+                circles = Ytrain[image]
+                n_circles = len(circles)
+
+                if n_circles != 0:
+                    with_craters.append(image)
+                    rank = np.array([[idx]] * n_circles)
+                    circles = np.concatenate((rank, circles), axis=1)
+                    Ytrain_reformated = np.concatenate((Ytrain_reformated, circles), axis=0)
+                    idx += 1
+                    
+            del Ytrain
+
+            Ytrain = Ytrain_reformated
+            Xtrain = Xtrain[with_craters]
 
         # Index
         idx = torch.arange(0, Xtrain.shape[0], dtype=torch.float)
 
         # To torch tensor
-        Xtrain = torch.tensor(Xtrain, dtype=torch.float)
+        Xtrain = torch.tensor(Xtrain / 255, dtype=torch.float).unsqueeze(1).expand(Xtrain.shape[0], 
+                                                                                   3, 224, 224)
         if Ytrain is not None:
             self.Ytrain = torch.tensor(Ytrain, dtype=torch.float)
 
+
         # Gray scaling
-        Xtrain = self.gray_scale(Xtrain)
-
-
-        # Data augmentation (to come)
+        # Xtrain = self.gray_scale(Xtrain)
 
 
         # PyTorch loaders
@@ -719,14 +716,6 @@ class CraterDataset(object):
         return train_tensor
 
 
-    def data_augmentation(self):
-        """
-        Set of transformations of data needed to improve 
-        training stability and robustness
-        """
-        pass
-
-
 
 #=========================================================================================================
 #================================ 6. OBJECT DETECTOR
@@ -745,15 +734,14 @@ Main class of the script:
 
 # HYPERPARAMETERS
 
-BATCH_SIZE = 16
-NUM_EPOCHS = 8
-LEARNING_RATE = 1e-3
-LEARNING_RATE_DECAY = 1
+BATCH_SIZE = 32
+NUM_EPOCHS = 50
+LEARNING_RATE = 4e-5
 
 MOMENTUM = 0.9
 WEIGHT_DECAY = 1e-4
 
-DISPLAY_STEP = 50
+DISPLAY_STEP = 25
 
 
 
@@ -779,10 +767,17 @@ class ObjectDetector(object):
         # Count the number of parameters in the network
         model_parameters = filter(lambda p: p.requires_grad, self.net.parameters())
         params = sum([np.prod(p.size()) for p in model_parameters])
-        print('>> Learning: {} parameters'.format(params))
+        print('>> {} parameters\n'.format(params))
 
 
     def fit(self, Xtrain, Ytrain):
+
+        # Optimizer
+        parameters_to_train = [p for p in self.net.parameters() if p.requires_grad]
+
+        optimizer = optim.SGD(parameters_to_train, lr=LEARNING_RATE,
+                                                   momentum=MOMENTUM,
+                                                   weight_decay=WEIGHT_DECAY)
 
         # Processing data
         batches = CraterDataset(Xtrain, BATCH_SIZE, Ytrain)
@@ -792,21 +787,12 @@ class ObjectDetector(object):
         step_number = 0
         for epoch in range(NUM_EPOCHS):
 
-            # Optimizer
-            parameters_to_train = [p for p in self.net.parameters() if p.requires_grad]
-
-            optimizer = optim.SGD(parameters_to_train, lr=LEARNING_RATE * LEARNING_RATE_DECAY ** epoch)
-                                                 # momentum=MOMENTUM,
-                                                 # weight_decay=WEIGHT_DECAY)
-
-            self.save_models(epoch)
-
-            print('Current learning rate: {}'.format(LEARNING_RATE * LEARNING_RATE_DECAY ** epoch))
-
-            step_number = 0
             running_loss = 0.0
-            
+            step_number = 0
+            step_count = 0
+
             for inputs, idx in batches.loader:
+
                 self.net.train()
 
                 # Variable
@@ -834,19 +820,14 @@ class ObjectDetector(object):
                     predicted_conf = conf[image_idx]
 
                     # Matching
-                    if n_true != 0:
-                        matches = match(prior, true_circles, threshold=0.4)
-                        goal = encode_ground_truth(true_circles, prior, matches)
-                    else:
-                        matches = None
-                        goal = None
+                    matches = match(prior, true_circles, threshold=0.4)
+                    goal = encode_ground_truth(true_circles, prior, matches)
 
                     # Image loss
-                    image_loss = multi_circle_loss(predicted_loc, goal, predicted_conf, matches, 0.5)
+                    image_loss = multi_circle_loss(predicted_loc, goal, predicted_conf, matches, 1)
 
                     # Batch loss
-                    loss += image_loss
-
+                    loss += image_loss / BATCH_SIZE
                 del inputs, idx
 
                 # Backward 
@@ -858,19 +839,25 @@ class ObjectDetector(object):
                 # print statistics
                 running_loss += loss.data.item()
                 step_number += 1
+                step_count += 1
 
                 if step_number % DISPLAY_STEP == 0:
-                    print('Epoch: %d  |  step: %4d  |  mean training loss: %.4f' % 
-                          (epoch, step_number, running_loss / step_number))
+                    print('Epoch: %d  |  step: %4d  |  training loss: %.4f' % 
+                          (epoch, step_number, running_loss / step_count))
+                    step_count = 0
+                    running_loss = 0.0
 
-        print('\nTraining time {}'.format(diff(datetime.now(), time)))
+            self.save_models(epoch)
+
+            print('Training time {}\n'.format(diff(datetime.now(), time)))
 
 
 
     def predict(self, Xtest):
-        
+        self.net.eval()
+
         # Processing data
-        self.batches = CraterDataset(Xtest, 8)
+        self.batches = CraterDataset(Xtest, BATCH_SIZE)
 
         # Raw prediction (using sigmoid activation since not in forward)
         to_proba = nn.sigmoid()
@@ -881,5 +868,5 @@ class ObjectDetector(object):
 
     def save_models(self, epoch):
         print('\nSaving model', end='...')
-        torch.save(self.net.state_dict(), "../models/craters_{}.model".format(epoch))
-        print('done\n')
+        torch.save(self.net.state_dict(), "../models/SSD_craters_{}.model".format(epoch))
+        print('done')

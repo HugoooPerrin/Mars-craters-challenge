@@ -220,7 +220,6 @@ def masking(Xtrain, Ytrain):
     n_images = Xtrain.shape[0]
 
     with_craters = []
-    n_with_craters = 0
     Ytrain_mask = np.zeros((n_images, 224, 224))
 
     for image in range(n_images):
@@ -228,9 +227,8 @@ def masking(Xtrain, Ytrain):
         circles = Ytrain[image]
         
         n_circles = len(circles)
-        
+
         if n_circles != 0:
-            n_with_craters += 1
             with_craters.append(image)
             
             for circle in circles:
@@ -405,26 +403,32 @@ AUGMENTATION = False
 CONCATENATE = False
 
 BATCH_SIZE = 16
-NUM_EPOCHS = 50
+NUM_EPOCHS = 35
 LEARNING_RATE = 6e-4
 
 # (10 epochs: 3e-4 => 0.0516,
             # 4e-4 => 0.0463,
             # 5e-4 => 0.0420,
-            # 6e-4 => 0.0400)
+            # 6e-4 => 0.0400,
+            # 7e-4 => 0.0439)    0h18
 
 # (20 epochs: 4e-4 => 0.0370,
-            # 5e-4 => 0.0260 / 0.0340 (?),
-            # 5.5e-4 => 0.0310)
+            # 5e-4 => 0.0340,
+            # 5.5e-4 => 0.0310,
+            # 6e-4 => 0.0297,
+            # 7e-4 => 0.0395)    0h36
 
 # (30 epochs: 5e-4 => 0.0269,
-            # 6e-4 => )
+            # 6e-4 => 0.0240 / ap: 0.40 (0.45),
+            # 7e-4 => 0.0256)    0h54
+
+# Begining of overfitting around epoch 35
 
 # (40 epochs: 5e-4 => 0.0240,
-            # 6e-4 => )
+            # 6e-4 => 0.0210 / ap: 0.37 (0.45))    1h12
 
 # (50 epochs: 5e-4 => 0.0212,
-            # 6e-4 => )
+            # 6e-4 => 0.0190)    1h30
 
 MOMENTUM = 0.9
 WEIGHT_DECAY = 1e-4
@@ -521,7 +525,7 @@ class ObjectDetector(object):
 
 
 
-    def predict(self, Xtest, threshold=0.35):
+    def predict(self, Xtest, threshold=0.45):
 
         # No longer in training
         self.net.eval()
