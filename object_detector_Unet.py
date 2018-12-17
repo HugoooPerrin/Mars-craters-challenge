@@ -60,7 +60,7 @@ import random
 import cv2
 import imutils
 from math import floor
-from typing import List, Tuple
+# from typing import List, Tuple
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
@@ -155,6 +155,10 @@ class Unet(nn.Module):
         self.bn2 = torch.nn.BatchNorm2d(512)
         self.mid_conv3 = torch.nn.Conv2d(512, 512, 3, padding=1)
         self.bn3 = torch.nn.BatchNorm2d(512)
+        # self.mid_conv4 = torch.nn.Conv2d(512, 512, 3, padding=1)
+        # self.bn4 = torch.nn.BatchNorm2d(512)
+        # self.mid_conv5 = torch.nn.Conv2d(512, 512, 3, padding=1)
+        # self.bn5 = torch.nn.BatchNorm2d(512)
 
         self.up_block1 = UNet_up_block(256, 512, 256)
         self.up_block2 = UNet_up_block(128, 256, 128)
@@ -182,6 +186,8 @@ class Unet(nn.Module):
         self.x6 = self.relu(self.bn1(self.mid_conv1(self.x6)))
         self.x6 = self.relu(self.bn2(self.mid_conv2(self.x6)))
         self.x6 = self.relu(self.bn3(self.mid_conv3(self.x6)))
+        # self.x6 = self.relu(self.bn4(self.mid_conv4(self.x6)))
+        # self.x6 = self.relu(self.bn5(self.mid_conv5(self.x6)))
 
         x = self.up_block1(self.x5, self.x6)
         x = self.up_block2(self.x4, x)
@@ -288,6 +294,14 @@ def bounding_circles(prediction):
     return circles
 
 
+
+def count_craters(Y):
+    counter = 0
+    for image in range(Y.shape[0]):
+        counter += len(Y[image])
+    return counter
+
+
 #=========================================================================================================
 #=========================================================================================================
 #================================ 3. DATA
@@ -326,7 +340,7 @@ class RandomBrightness:
 
 class CraterDataset(object):
 
-    def __init__(self, Xtrain, batch_size=8, Ytrain=None):
+    def __init__(self, Xtrain, batch_size=16, Ytrain=None):
 
         # Reformating
         Xtrain = np.array(Xtrain)
@@ -337,27 +351,34 @@ class CraterDataset(object):
         # Data augmentation
         if AUGMENTATION:
             if Ytrain is not None:
-                flip = RandomFlip()
-
+                print('Augmenting data', end='...')
                 if CONCATENATE:
+                    flip = RandomFlip(prob=1)
+
                     Xtrain_transform = np.zeros(Xtrain.shape)
                     Ytrain_transform = np.zeros(Ytrain.shape)
 
                     for image in range(Xtrain.shape[0]):
                         Xtrain_transform[image], Ytrain_transform[image] = flip(Xtrain[image], Ytrain[image])
 
-                    light = RandomBrightness(limit=0.01 * 255)
-                    Xtrain_transform = light(Xtrain_transform)
+                    # light = RandomBrightness(limit=0.01 * 255)
+                    # Xtrain_transform = light(Xtrain_transform)
 
                     Xtrain = np.concatenate((Xtrain, Xtrain_transform), axis=0)
+                    del Xtrain_transform
                     Ytrain = np.concatenate((Ytrain, Ytrain_transform), axis=0)
+                    del Ytrain_transform
 
                 else:
+                    flip = RandomFlip(prob=0.66)
+                    
                     for image in range(Xtrain.shape[0]):
                         Xtrain[image], Ytrain[image] = flip(Xtrain[image], Ytrain[image])
 
-                    light = RandomBrightness(limit=0.01 * 255)
-                    Xtrain = light(Xtrain)
+                    # light = RandomBrightness(limit=0.01 * 255)
+                    # Xtrain = light(Xtrain)
+                print('done')
+                print('>>', Xtrain.shape, Ytrain.shape, '\n')
 
 
         # To torch tensor & normalization
@@ -399,11 +420,12 @@ Main class of the script:
 
 # HYPERPARAMETERS
 
-AUGMENTATION = False
-CONCATENATE = False
+AUGMENTATION = True
+CONCATENATE = True
+RANDOMIZED = False
 
 BATCH_SIZE = 16
-NUM_EPOCHS = 35
+NUM_EPOCHS = 40
 LEARNING_RATE = 6e-4
 
 # (10 epochs: 3e-4 => 0.0516,
@@ -513,22 +535,30 @@ class ObjectDetector(object):
                     print('Epoch: %d  |  step: %4d  |  training loss: %.4f' % 
                           (epoch, step_number, running_loss / step_number))
 
-            # Processing data
-            # (Different randomized transformation at each epoch)
-            if AUGMENTATION:
-                del batches
-                batches = CraterDataset(Xtrain, BATCH_SIZE, Ytrain)
-
             self.save_models(epoch)
 
             print('Training time {}\n'.format(diff(datetime.now(), time)))
 
+            # Processing data
+            # (Different randomized transformation at each epoch)
+            if AUGMENTATION & RANDOMIZED:
+                del batches
+                batches = CraterDataset(Xtrain, BATCH_SIZE, Ytrain)
+
+        print('Estimation of best threshold', end='...')
+        self.best_threshold = self.find_threshold(Xtrain, Ytrain)
+        print('done\n>> Best threshold %.2f' % self.best_threshold)
 
 
-    def predict(self, Xtest, threshold=0.45):
+
+    def predict(self, Xtest, threshold=None):
 
         # No longer in training
         self.net.eval()
+
+        # Threshold
+        if threshold is None:
+            threshold = self.best_threshold
 
         # Processing data
         batches = CraterDataset(Xtest, BATCH_SIZE)
@@ -563,8 +593,24 @@ class ObjectDetector(object):
         return Ypred
 
 
-    def find_best_threshold(Xtrain, Ytrain):
-        pass
+
+    def find_threshold(self, Xtrain, Ytrain):
+        
+        thresholds = [0.38, 0.42, 0.45, 0.48, 0.52, 0.55, 0.57, 0.6, 0.62, 0.65]
+        n_images = Xtrain.shape[0]
+        best_threshold = 0
+            
+        for threshold in thresholds:
+            
+            Ypred = self.predict(Xtrain[:1000], threshold)
+            estimated_count = count_craters(Ypred)
+            
+            if estimated_count != 0:
+                best_threshold = threshold
+            else:
+                break
+                
+        return best_threshold
 
 
 

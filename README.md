@@ -7,4 +7,5 @@ Image segmentation on planetary images
 Both rely on pytorch framework
 
 More example in 'Unet example' notebook:
-![](https://github.com/HugoooPerrin/Mars-craters-challenge/screen.png)
+
+![](https://github.com/HugoooPerrin/Mars-craters-challenge/blob/master/screen.png)
